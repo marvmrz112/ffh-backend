@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   IonCard,
   IonCardContent,
@@ -19,38 +19,81 @@ import {
 import { trophyOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
+type FeatureConfig = {
+  show_tab?: boolean;
+  [key: string]: any;
+};
+
 type FeatureRow = {
   key: string;
   enabled: boolean | null;
   title: string | null;
-  config: any | null;
+  config: FeatureConfig | string | null;
+  updated_at?: string | null;
 };
 
 const FEATURE_KEY = "games_leaderboard";
+const DEFAULT_TITLE = "Spiele & Tabelle";
+
+function normalizeConfig(config: FeatureRow["config"]): FeatureConfig {
+  if (!config) return { show_tab: true };
+
+  // Sometimes config comes as a JSON string depending on how it was written
+  if (typeof config === "string") {
+    try {
+      const parsed = JSON.parse(config);
+      if (parsed && typeof parsed === "object") return parsed as FeatureConfig;
+    } catch {
+      return { show_tab: true };
+    }
+  }
+
+  if (typeof config === "object") {
+    return config as FeatureConfig;
+  }
+
+  return { show_tab: true };
+}
+
+type FeatureState = {
+  enabled: boolean;
+  showTab: boolean;
+  title: string;
+};
 
 const GamesHome: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const [enabled, setEnabled] = useState(true);
-  const [showTab, setShowTab] = useState(true);
+  const [feature, setFeature] = useState<FeatureState>({
+    enabled: true,
+    showTab: true,
+    title: DEFAULT_TITLE,
+  });
 
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
+
+  // Used to avoid out-of-order saves (only the latest save should "win")
+  const saveTokenRef = useRef(0);
 
   const toast = (msg: string) => {
     setToastMsg(msg);
     setToastOpen(true);
   };
 
+  const statusText = useMemo(() => {
+    return `Aktuell: enabled=${String(feature.enabled)} | show_tab=${String(feature.showTab)}`;
+  }, [feature.enabled, feature.showTab]);
+
   const load = async () => {
     setLoading(true);
 
     const { data, error } = await supabase
       .from("app_features")
-      .select("key, enabled, title, config")
+      .select("key, enabled, title, config, updated_at")
       .eq("key", FEATURE_KEY)
-      .limit(1);
+      .maybeSingle();
 
     if (error) {
       toast(`Load Fehler: ${error.message}`);
@@ -58,60 +101,91 @@ const GamesHome: React.FC = () => {
       return;
     }
 
-    if (!data || data.length === 0) {
-      setEnabled(true);
-      setShowTab(true);
+    if (!data) {
+      // Row doesn't exist yet -> sensible defaults
+      setFeature({
+        enabled: true,
+        showTab: true,
+        title: DEFAULT_TITLE,
+      });
       setLoading(false);
       return;
     }
 
-    const row = data[0] as FeatureRow;
-    setEnabled(!!row.enabled);
-    setShowTab(!!row?.config?.show_tab);
+    const cfg = normalizeConfig((data as FeatureRow).config);
+    setFeature({
+      enabled: !!data.enabled,
+      showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : true,
+      title: data.title ?? DEFAULT_TITLE,
+    });
 
     setLoading(false);
   };
 
-  const save = async (nextEnabled: boolean, nextShowTab: boolean, prev: { enabled: boolean; showTab: boolean }) => {
+  const save = async (next: FeatureState, prev: FeatureState) => {
     setSaving(true);
 
-    const payload = {
+    const token = ++saveTokenRef.current;
+
+    const payload: FeatureRow = {
       key: FEATURE_KEY,
-      enabled: nextEnabled,
-      title: "Spiele & Tabelle",
-      config: { show_tab: nextShowTab },
+      enabled: next.enabled,
+      title: next.title ?? DEFAULT_TITLE,
+      config: { show_tab: next.showTab },
+      // If you have a DB trigger for updated_at, remove this:
       updated_at: new Date().toISOString(),
     };
 
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("app_features")
-      .upsert(payload, { onConflict: "key" });
+      .upsert(payload, { onConflict: "key" })
+      .select("key, enabled, title, config, updated_at")
+      .maybeSingle();
+
+    // If another save started after this one, ignore this response
+    if (token !== saveTokenRef.current) return;
 
     setSaving(false);
 
     if (error) {
-      // revert
-      setEnabled(prev.enabled);
-      setShowTab(prev.showTab);
+      setFeature(prev); // revert
       toast(`Save geblockt (RLS?): ${error.message}`);
       return;
     }
+
+    // Trust DB response if present (prevents drift)
+    if (data) {
+      const cfg = normalizeConfig((data as FeatureRow).config);
+      setFeature({
+        enabled: !!data.enabled,
+        showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : next.showTab,
+        title: data.title ?? DEFAULT_TITLE,
+      });
+    }
+
+    toast("Gespeichert.");
   };
 
   useEffect(() => {
     void load();
   }, []);
 
-  const onToggleEnabled = async (checked: boolean) => {
-    const prev = { enabled, showTab };
-    setEnabled(checked); // optimistic UI
-    await save(checked, showTab, prev);
+  const setEnabled = async (checked: boolean) => {
+    const prev = feature;
+
+    // If disabling feature, we can keep showTab as-is, but UI should disable its toggle
+    const next: FeatureState = { ...feature, enabled: checked };
+
+    setFeature(next); // optimistic UI
+    await save(next, prev);
   };
 
-  const onToggleShowTab = async (checked: boolean) => {
-    const prev = { enabled, showTab };
-    setShowTab(checked); // optimistic UI
-    await save(enabled, checked, prev);
+  const setShowTab = async (checked: boolean) => {
+    const prev = feature;
+    const next: FeatureState = { ...feature, showTab: checked };
+
+    setFeature(next); // optimistic UI
+    await save(next, prev);
   };
 
   return (
@@ -147,9 +221,9 @@ const GamesHome: React.FC = () => {
                         <IonNote>Schaltet Feature grundsätzlich an/aus</IonNote>
                       </IonLabel>
                       <IonToggle
-                        checked={enabled}
+                        checked={feature.enabled}
                         disabled={saving}
-                        onIonChange={(e) => onToggleEnabled(!!e.detail.checked)}
+                        onIonChange={(e) => void setEnabled(!!e.detail.checked)}
                       />
                     </IonItem>
 
@@ -159,9 +233,10 @@ const GamesHome: React.FC = () => {
                         <IonNote>Ob der Tab in der App angezeigt wird</IonNote>
                       </IonLabel>
                       <IonToggle
-                        checked={showTab}
-                        disabled={saving}
-                        onIonChange={(e) => onToggleShowTab(!!e.detail.checked)}
+                        checked={feature.showTab}
+                        // semantisch sinnvoll: show_tab nur änderbar, wenn Feature enabled
+                        disabled={saving || !feature.enabled}
+                        onIonChange={(e) => void setShowTab(!!e.detail.checked)}
                       />
                     </IonItem>
                   </IonList>
@@ -169,8 +244,14 @@ const GamesHome: React.FC = () => {
               </div>
 
               <div style={{ marginTop: 10, fontSize: 12.5, opacity: 0.7, fontWeight: 800 }}>
-                Aktuell: enabled={String(enabled)} | show_tab={String(showTab)}
+                {statusText}
               </div>
+
+              {!feature.enabled && (
+                <IonNote style={{ display: "block", marginTop: 8 }}>
+                  Hinweis: Solange enabled=false ist, ist show_tab irrelevant (Tab wird nicht angezeigt).
+                </IonNote>
+              )}
             </IonCardContent>
           </IonCard>
         </div>
@@ -178,7 +259,7 @@ const GamesHome: React.FC = () => {
         <IonToast
           isOpen={toastOpen}
           message={toastMsg}
-          duration={3500}
+          duration={2500}
           onDidDismiss={() => setToastOpen(false)}
         />
       </IonContent>
