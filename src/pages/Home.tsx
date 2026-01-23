@@ -198,20 +198,6 @@ const Home: React.FC = () => {
 
       <IonContent className="ion-padding">
         <div style={{ maxWidth: 1100, margin: '0 auto' }}>
-          {/* DEBUG BANNER – zum Testen auf Vercel (kannst du später wieder löschen) */}
-          <div
-            style={{
-              background: 'linear-gradient(90deg, #d50000, #7a0000)',
-              color: 'white',
-              padding: '10px 12px',
-              borderRadius: 12,
-              fontWeight: 900,
-              marginBottom: 12,
-            }}
-          >
-            HOME.TSX LIVE ✅ {new Date().toLocaleString()}
-          </div>
-
           <Section title="Inhalt">
             <Tile title="News" icon={newspaperOutline} to="/news" subtitle="Beiträge erstellen & verwalten" />
             <Tile title="Programm" icon={calendarOutline} to="/program" subtitle="Programmpunkte pflegen" />
@@ -224,12 +210,7 @@ const Home: React.FC = () => {
           </Section>
 
           <Section title="Spiele">
-            <Tile
-              title="Spiele & Tabelle"
-              icon={trophyOutline}
-              to="/games"
-              subtitle="Leaderboard / Platzierungen"
-            />
+            <Tile title="Spiele & Tabelle" icon={trophyOutline} to="/games" subtitle="Leaderboard / Platzierungen" />
           </Section>
         </div>
       </IonContent>
