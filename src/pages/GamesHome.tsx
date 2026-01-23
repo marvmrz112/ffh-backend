@@ -38,7 +38,6 @@ const DEFAULT_TITLE = "Spiele & Tabelle";
 function normalizeConfig(config: FeatureRow["config"]): FeatureConfig {
   if (!config) return { show_tab: true };
 
-  // Sometimes config comes as a JSON string depending on how it was written
   if (typeof config === "string") {
     try {
       const parsed = JSON.parse(config);
@@ -66,7 +65,7 @@ const GamesHome: React.FC = () => {
   const [saving, setSaving] = useState(false);
 
   const [feature, setFeature] = useState<FeatureState>({
-    enabled: true,
+    enabled: false,
     showTab: true,
     title: DEFAULT_TITLE,
   });
@@ -74,7 +73,7 @@ const GamesHome: React.FC = () => {
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
 
-  // Used to avoid out-of-order saves (only the latest save should "win")
+  // Avoid out-of-order saves: only latest save response may update state
   const saveTokenRef = useRef(0);
 
   const toast = (msg: string) => {
@@ -86,40 +85,74 @@ const GamesHome: React.FC = () => {
     return `Aktuell: enabled=${String(feature.enabled)} | show_tab=${String(feature.showTab)}`;
   }, [feature.enabled, feature.showTab]);
 
+  const ensureRow = async () => {
+    // Idempotent: creates row if missing; keeps existing row otherwise
+    const payload: FeatureRow = {
+      key: FEATURE_KEY,
+      enabled: false, // default off
+      title: DEFAULT_TITLE,
+      config: { show_tab: true },
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from("app_features")
+      .upsert(payload, { onConflict: "key" });
+
+    if (error) throw error;
+  };
+
   const load = async () => {
     setLoading(true);
 
-    const { data, error } = await supabase
-      .from("app_features")
-      .select("key, enabled, title, config, updated_at")
-      .eq("key", FEATURE_KEY)
-      .maybeSingle();
+    try {
+      const first = await supabase
+        .from("app_features")
+        .select("key, enabled, title, config, updated_at")
+        .eq("key", FEATURE_KEY)
+        .maybeSingle();
 
-    if (error) {
-      toast(`Load Fehler: ${error.message}`);
-      setLoading(false);
-      return;
-    }
+      if (first.error) throw first.error;
 
-    if (!data) {
-      // Row doesn't exist yet -> sensible defaults
+      if (!first.data) {
+        // Create missing row, then load again
+        await ensureRow();
+
+        const second = await supabase
+          .from("app_features")
+          .select("key, enabled, title, config, updated_at")
+          .eq("key", FEATURE_KEY)
+          .maybeSingle();
+
+        if (second.error) throw second.error;
+        if (!second.data) throw new Error("Konnte Feature-Row nicht anlegen (Row weiterhin null).");
+
+        const row = second.data as FeatureRow;
+        const cfg = normalizeConfig(row.config);
+
+        setFeature({
+          enabled: !!row.enabled,
+          showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : true,
+          title: row.title ?? DEFAULT_TITLE,
+        });
+
+        return;
+      }
+
+      const row = first.data as FeatureRow;
+      const cfg = normalizeConfig(row.config);
+
       setFeature({
-        enabled: true,
-        showTab: true,
-        title: DEFAULT_TITLE,
+        enabled: !!row.enabled,
+        showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : true,
+        title: row.title ?? DEFAULT_TITLE,
       });
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannter Fehler";
+      toast(`Load/Init Fehler: ${msg}`);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const cfg = normalizeConfig((data as FeatureRow).config);
-    setFeature({
-      enabled: !!data.enabled,
-      showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : true,
-      title: data.title ?? DEFAULT_TITLE,
-    });
-
-    setLoading(false);
   };
 
   const save = async (next: FeatureState, prev: FeatureState) => {
@@ -132,48 +165,58 @@ const GamesHome: React.FC = () => {
       enabled: next.enabled,
       title: next.title ?? DEFAULT_TITLE,
       config: { show_tab: next.showTab },
-      // If you have a DB trigger for updated_at, remove this:
+      // remove if DB trigger manages this
       updated_at: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase
+    const res = await supabase
       .from("app_features")
       .upsert(payload, { onConflict: "key" })
       .select("key, enabled, title, config, updated_at")
       .maybeSingle();
 
-    // If another save started after this one, ignore this response
+    // Ignore stale responses if newer save started
     if (token !== saveTokenRef.current) return;
 
     setSaving(false);
 
-    if (error) {
+    if (res.error) {
       setFeature(prev); // revert
-      toast(`Save geblockt (RLS?): ${error.message}`);
+
+      const lower = (res.error.message ?? "").toLowerCase();
+      const msg =
+        lower.includes("row-level security") || lower.includes("policy")
+          ? "Save geblockt: RLS/Policy verhindert UPDATE/UPSERT."
+          : `Save Fehler: ${res.error.message}`;
+
+      toast(msg);
       return;
     }
 
-    // Trust DB response if present (prevents drift)
-    if (data) {
-      const cfg = normalizeConfig((data as FeatureRow).config);
+    // Trust DB response if present to prevent drift
+    if (res.data) {
+      const row = res.data as FeatureRow;
+      const cfg = normalizeConfig(row.config);
+
       setFeature({
-        enabled: !!data.enabled,
+        enabled: !!row.enabled,
         showTab: cfg.show_tab !== undefined ? !!cfg.show_tab : next.showTab,
-        title: data.title ?? DEFAULT_TITLE,
+        title: row.title ?? DEFAULT_TITLE,
       });
     }
 
     toast("Gespeichert.");
+    // For debugging robustness: reload to verify DB state
+    await load();
   };
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const setEnabled = async (checked: boolean) => {
     const prev = feature;
-
-    // If disabling feature, we can keep showTab as-is, but UI should disable its toggle
     const next: FeatureState = { ...feature, enabled: checked };
 
     setFeature(next); // optimistic UI
@@ -234,7 +277,6 @@ const GamesHome: React.FC = () => {
                       </IonLabel>
                       <IonToggle
                         checked={feature.showTab}
-                        // semantisch sinnvoll: show_tab nur änderbar, wenn Feature enabled
                         disabled={saving || !feature.enabled}
                         onIonChange={(e) => void setShowTab(!!e.detail.checked)}
                       />
@@ -259,7 +301,7 @@ const GamesHome: React.FC = () => {
         <IonToast
           isOpen={toastOpen}
           message={toastMsg}
-          duration={2500}
+          duration={3000}
           onDidDismiss={() => setToastOpen(false)}
         />
       </IonContent>
