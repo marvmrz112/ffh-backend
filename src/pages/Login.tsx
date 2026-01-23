@@ -125,7 +125,7 @@ const Login: React.FC = () => {
                     }}
                   >
                     Du meldest dich mit deinem Feuerwehr Microsoft-Konto an. Danach landest du im
-                    Dashboard.
+                    App Backend.
                   </div>
 
                   <IonButton
@@ -161,7 +161,7 @@ const Login: React.FC = () => {
       <IonFooter style={{ background: '#0b1220' }}>
         <div style={{ padding: '10px 16px', textAlign: 'center' }}>
           <IonText style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12 }}>
-            © FFH Crew – intern
+            © Freiwillige Feuerehr Kelkheim-Hornau 1928 e.V – intern
           </IonText>
         </div>
       </IonFooter>

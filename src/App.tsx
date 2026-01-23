@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Redirect, Route } from 'react-router-dom';
 import { IonApp, IonRouterOutlet, setupIonicReact } from '@ionic/react';
 import { IonReactRouter } from '@ionic/react-router';
@@ -44,164 +44,187 @@ import SponsorsList from './pages/SponsorsList';
 import SponsorsCreate from './pages/SponsorsCreate';
 import SponsorsDetail from './pages/SponsorsDetail';
 
+// Games
+import GamesHome from './pages/GamesHome';
+
 setupIonicReact();
 
 // UUID Pattern (Supabase ids)
-const UUID = ':id([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})';
+const UUID =
+  ':id([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})';
 
-const App: React.FC = () => (
-  <IonApp>
-    <AuthProvider>
-      <IonReactRouter>
-        <IonRouterOutlet>
-          {/* PUBLIC */}
-          <Route exact path="/login" component={Login} />
-          <Route exact path="/auth/callback" component={AuthCallback} />
+const App: React.FC = () => {
+  // Optional: helpful in prod debugging
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log('[ffh-backend] App mounted');
+  }, []);
 
-          {/* HOME */}
-          <Route
-            exact
-            path="/"
-            render={() => (
-              <ProtectedRoute>
-                <Home />
-              </ProtectedRoute>
-            )}
-          />
+  return (
+    <IonApp>
+      <AuthProvider>
+        <IonReactRouter>
+          <IonRouterOutlet>
+            {/* PUBLIC */}
+            <Route exact path="/login" component={Login} />
+            <Route exact path="/auth/callback" component={AuthCallback} />
 
-          {/* NEWS */}
-          <Route
-            exact
-            path="/news"
-            render={() => (
-              <ProtectedRoute>
-                <NewsList />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path="/news/create"
-            render={() => (
-              <ProtectedRoute>
-                <NewsCreate />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path={`/news/${UUID}`}
-            render={() => (
-              <ProtectedRoute>
-                <NewsDetail />
-              </ProtectedRoute>
-            )}
-          />
+            {/* HOME */}
+            <Route
+              exact
+              path="/"
+              render={() => (
+                <ProtectedRoute>
+                  <Home />
+                </ProtectedRoute>
+              )}
+            />
 
-          {/* PROGRAM */}
-          <Route
-            exact
-            path="/program"
-            render={() => (
-              <ProtectedRoute>
-                <ProgramList />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path="/program/create"
-            render={() => (
-              <ProtectedRoute>
-                <ProgramCreate />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path={`/program/${UUID}`}
-            render={() => (
-              <ProtectedRoute>
-                <ProgramDetail />
-              </ProtectedRoute>
-            )}
-          />
+            {/* NEWS */}
+            <Route
+              exact
+              path="/news"
+              render={() => (
+                <ProtectedRoute>
+                  <NewsList />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path="/news/create"
+              render={() => (
+                <ProtectedRoute>
+                  <NewsCreate />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path={`/news/${UUID}`}
+              render={() => (
+                <ProtectedRoute>
+                  <NewsDetail />
+                </ProtectedRoute>
+              )}
+            />
 
-          {/* FOOD */}
-          <Route
-            exact
-            path="/food"
-            render={() => (
-              <ProtectedRoute>
-                <FoodList />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path="/food/create"
-            render={() => (
-              <ProtectedRoute>
-                <FoodCreate />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path={`/food/${UUID}`}
-            render={() => (
-              <ProtectedRoute>
-                <FoodDetail />
-              </ProtectedRoute>
-            )}
-          />
+            {/* PROGRAM */}
+            <Route
+              exact
+              path="/program"
+              render={() => (
+                <ProtectedRoute>
+                  <ProgramList />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path="/program/create"
+              render={() => (
+                <ProtectedRoute>
+                  <ProgramCreate />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path={`/program/${UUID}`}
+              render={() => (
+                <ProtectedRoute>
+                  <ProgramDetail />
+                </ProtectedRoute>
+              )}
+            />
 
-          {/* COUNTDOWN */}
-          <Route
-            exact
-            path="/countdown"
-            render={() => (
-              <ProtectedRoute>
-                <Countdown />
-              </ProtectedRoute>
-            )}
-          />
+            {/* FOOD */}
+            <Route
+              exact
+              path="/food"
+              render={() => (
+                <ProtectedRoute>
+                  <FoodList />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path="/food/create"
+              render={() => (
+                <ProtectedRoute>
+                  <FoodCreate />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path={`/food/${UUID}`}
+              render={() => (
+                <ProtectedRoute>
+                  <FoodDetail />
+                </ProtectedRoute>
+              )}
+            />
 
-          {/* SPONSORS */}
-          <Route
-            exact
-            path="/sponsors"
-            render={() => (
-              <ProtectedRoute>
-                <SponsorsList />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path="/sponsors/create"
-            render={() => (
-              <ProtectedRoute>
-                <SponsorsCreate />
-              </ProtectedRoute>
-            )}
-          />
-          <Route
-            exact
-            path={`/sponsors/${UUID}`}
-            render={() => (
-              <ProtectedRoute>
-                <SponsorsDetail />
-              </ProtectedRoute>
-            )}
-          />
+            {/* COUNTDOWN */}
+            <Route
+              exact
+              path="/countdown"
+              render={() => (
+                <ProtectedRoute>
+                  <Countdown />
+                </ProtectedRoute>
+              )}
+            />
 
-          {/* FALLBACK */}
-          <Route render={() => <Redirect to="/" />} />
-        </IonRouterOutlet>
-      </IonReactRouter>
-    </AuthProvider>
-  </IonApp>
-);
+            {/* SPONSORS */}
+            <Route
+              exact
+              path="/sponsors"
+              render={() => (
+                <ProtectedRoute>
+                  <SponsorsList />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path="/sponsors/create"
+              render={() => (
+                <ProtectedRoute>
+                  <SponsorsCreate />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              exact
+              path={`/sponsors/${UUID}`}
+              render={() => (
+                <ProtectedRoute>
+                  <SponsorsDetail />
+                </ProtectedRoute>
+              )}
+            />
+
+            {/* GAMES */}
+            <Route
+              exact
+              path="/games"
+              render={() => (
+                <ProtectedRoute>
+                  <GamesHome />
+                </ProtectedRoute>
+              )}
+            />
+
+            {/* FALLBACK */}
+            <Route render={() => <Redirect to="/" />} />
+          </IonRouterOutlet>
+        </IonReactRouter>
+      </AuthProvider>
+    </IonApp>
+  );
+};
 
 export default App;
