@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import {
-  IonButton,
   IonCard,
   IonCardContent,
   IonContent,
@@ -15,16 +14,9 @@ import {
   IonTitle,
   IonToggle,
   IonToolbar,
+  IonToast,
 } from "@ionic/react";
-import {
-  trophyOutline,
-  settingsOutline,
-  listOutline,
-  peopleOutline,
-  flagOutline,
-  playOutline,
-} from "ionicons/icons";
-import { useHistory } from "react-router-dom";
+import { trophyOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
 type FeatureRow = {
@@ -37,13 +29,19 @@ type FeatureRow = {
 const FEATURE_KEY = "games_leaderboard";
 
 const GamesHome: React.FC = () => {
-  const history = useHistory();
-
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const [enabled, setEnabled] = useState(true);
   const [showTab, setShowTab] = useState(true);
+
+  const [toastOpen, setToastOpen] = useState(false);
+  const [toastMsg, setToastMsg] = useState("");
+
+  const toast = (msg: string) => {
+    setToastMsg(msg);
+    setToastOpen(true);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -54,8 +52,13 @@ const GamesHome: React.FC = () => {
       .eq("key", FEATURE_KEY)
       .limit(1);
 
-    if (error || !data || data.length === 0) {
-      // Fallback: wenn der Eintrag fehlt, zeigen wir im Backend trotzdem alles an
+    if (error) {
+      toast(`Load Fehler: ${error.message}`);
+      setLoading(false);
+      return;
+    }
+
+    if (!data || data.length === 0) {
       setEnabled(true);
       setShowTab(true);
       setLoading(false);
@@ -69,7 +72,7 @@ const GamesHome: React.FC = () => {
     setLoading(false);
   };
 
-  const save = async (nextEnabled: boolean, nextShowTab: boolean) => {
+  const save = async (nextEnabled: boolean, nextShowTab: boolean, prev: { enabled: boolean; showTab: boolean }) => {
     setSaving(true);
 
     const payload = {
@@ -80,25 +83,36 @@ const GamesHome: React.FC = () => {
       updated_at: new Date().toISOString(),
     };
 
-    // upsert: existiert -> update, sonst insert
     const { error } = await supabase
       .from("app_features")
       .upsert(payload, { onConflict: "key" });
 
     setSaving(false);
 
-    if (!error) {
-      setEnabled(nextEnabled);
-      setShowTab(nextShowTab);
-    } else {
-      // wenn was schiefgeht -> wieder reload
-      await load();
+    if (error) {
+      // revert
+      setEnabled(prev.enabled);
+      setShowTab(prev.showTab);
+      toast(`Save geblockt (RLS?): ${error.message}`);
+      return;
     }
   };
 
   useEffect(() => {
     void load();
   }, []);
+
+  const onToggleEnabled = async (checked: boolean) => {
+    const prev = { enabled, showTab };
+    setEnabled(checked); // optimistic UI
+    await save(checked, showTab, prev);
+  };
+
+  const onToggleShowTab = async (checked: boolean) => {
+    const prev = { enabled, showTab };
+    setShowTab(checked); // optimistic UI
+    await save(enabled, checked, prev);
+  };
 
   return (
     <IonPage>
@@ -114,95 +128,59 @@ const GamesHome: React.FC = () => {
       </IonHeader>
 
       <IonContent className="ion-padding">
-        <div style={{ maxWidth: 980, margin: "0 auto" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto" }}>
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14 }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 900, fontSize: 16 }}>Spiele in der Handy-App anzeigen</div>
-                  <IonNote style={{ display: "block", marginTop: 6 }}>
-                    Steuert den Tab „Spiele“ in der Event-App über <b>app_features</b> ({FEATURE_KEY})
-                  </IonNote>
-                </div>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>Feature Toggle</div>
+              <IonNote style={{ display: "block", marginTop: 6 }}>
+                Steuert den Spiele-Tab in der Handy-App (app_features / {FEATURE_KEY})
+              </IonNote>
 
+              <div style={{ marginTop: 12 }}>
                 {loading ? (
                   <IonSpinner />
                 ) : (
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontWeight: 800, fontSize: 12, opacity: 0.7 }}>enabled</div>
+                  <IonList lines="inset">
+                    <IonItem>
+                      <IonLabel>
+                        <div style={{ fontWeight: 900 }}>enabled</div>
+                        <IonNote>Schaltet Feature grundsätzlich an/aus</IonNote>
+                      </IonLabel>
                       <IonToggle
                         checked={enabled}
                         disabled={saving}
-                        onIonChange={(e) => save(!!e.detail.checked, showTab)}
+                        onIonChange={(e) => onToggleEnabled(!!e.detail.checked)}
                       />
-                    </div>
+                    </IonItem>
 
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontWeight: 800, fontSize: 12, opacity: 0.7 }}>show_tab</div>
+                    <IonItem>
+                      <IonLabel>
+                        <div style={{ fontWeight: 900 }}>config.show_tab</div>
+                        <IonNote>Ob der Tab in der App angezeigt wird</IonNote>
+                      </IonLabel>
                       <IonToggle
                         checked={showTab}
                         disabled={saving}
-                        onIonChange={(e) => save(enabled, !!e.detail.checked)}
+                        onIonChange={(e) => onToggleShowTab(!!e.detail.checked)}
                       />
-                    </div>
-                  </div>
+                    </IonItem>
+                  </IonList>
                 )}
               </div>
 
-              <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <IonButton
-                  onClick={() => history.push("/games/events")}
-                  fill="solid"
-                >
-                  <IonIcon slot="start" icon={flagOutline} />
-                  Events
-                </IonButton>
-
-                <IonButton onClick={() => history.push("/games/disciplines")} fill="outline">
-                  <IonIcon slot="start" icon={listOutline} />
-                  Disziplinen
-                </IonButton>
-
-                <IonButton onClick={() => history.push("/games/teams")} fill="outline">
-                  <IonIcon slot="start" icon={peopleOutline} />
-                  Teams
-                </IonButton>
-
-                <IonButton onClick={() => history.push("/games/runs")} fill="outline">
-                  <IonIcon slot="start" icon={playOutline} />
-                  Läufe
-                </IonButton>
-
-                <IonButton onClick={() => history.push("/games/settings")} fill="clear">
-                  <IonIcon slot="start" icon={settingsOutline} />
-                  Einstellungen
-                </IonButton>
+              <div style={{ marginTop: 10, fontSize: 12.5, opacity: 0.7, fontWeight: 800 }}>
+                Aktuell: enabled={String(enabled)} | show_tab={String(showTab)}
               </div>
             </IonCardContent>
           </IonCard>
-
-          <IonCard style={{ borderRadius: 18 }}>
-            <IonCardContent>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>Status</div>
-              <IonList lines="inset">
-                <IonItem>
-                  <IonLabel>
-                    <div style={{ fontWeight: 900 }}>enabled</div>
-                    <IonNote>{String(enabled)}</IonNote>
-                  </IonLabel>
-                </IonItem>
-
-                <IonItem>
-                  <IonLabel>
-                    <div style={{ fontWeight: 900 }}>config.show_tab</div>
-                    <IonNote>{String(showTab)}</IonNote>
-                  </IonLabel>
-                </IonItem>
-              </IonList>
-            </IonCardContent>
-          </IonCard>
         </div>
+
+        <IonToast
+          isOpen={toastOpen}
+          message={toastMsg}
+          duration={3500}
+          onDidDismiss={() => setToastOpen(false)}
+        />
       </IonContent>
     </IonPage>
   );
