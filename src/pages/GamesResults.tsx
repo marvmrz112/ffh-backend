@@ -23,7 +23,7 @@ import {
   IonToolbar,
   IonToast,
 } from "@ionic/react";
-import { refreshOutline, saveOutline, createOutline } from "ionicons/icons";
+import { refreshOutline, createOutline, saveOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
 type ActiveEventRow = {
@@ -50,9 +50,16 @@ type RunRow = {
   id: string;
   discipline_id: string;
   name: string | null;
-  starts_at: string | null;
+
   status: string | null;
+  sort_order: number | null;
+
+  scheduled_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
 type RunResultRow = {
@@ -108,9 +115,10 @@ function formatBerlin(ts?: string | null) {
   }
 }
 
-function toDatetimeLocalValue(iso?: string | null) {
+function isoToDatetimeLocal(iso?: string | null) {
   if (!iso) return "";
   const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
   const pad = (n: number) => String(n).padStart(2, "0");
   const yyyy = d.getFullYear();
   const mm = pad(d.getMonth() + 1);
@@ -118,6 +126,14 @@ function toDatetimeLocalValue(iso?: string | null) {
   const hh = pad(d.getHours());
   const mi = pad(d.getMinutes());
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function datetimeLocalToISO(value: string): string | null {
+  const s = (value ?? "").trim();
+  if (!s) return null;
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString();
 }
 
 function parseIntOrNull(v: string): number | null {
@@ -137,7 +153,6 @@ function parseFloatOrNull(v: string): number | null {
 }
 
 function parseMsFromMSS(v: string): number | null {
-  // accepts "m:ss", "mm:ss", "ss", "ss.sss" (seconds), or big integer as ms
   const s = v.trim();
   if (!s) return null;
 
@@ -186,6 +201,9 @@ type BuildPayloadOk = {
 type BuildPayloadErr = { ok: false; error: string };
 type BuildPayloadRes = BuildPayloadOk | BuildPayloadErr;
 
+const SELECT_RESULT =
+  "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at";
+
 const GamesResults: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [globalSaving, setGlobalSaving] = useState(false);
@@ -226,13 +244,26 @@ const GamesResults: React.FC = () => {
 
   const hasDirty = useMemo(() => vmRows.some((r) => r.dirty), [vmRows]);
 
+  // ---------- LOAD ----------
   const loadActiveEvent = async (): Promise<ActiveEventRow | null> => {
-    const res = await supabase
+    // Prefer games_events.active=true
+    const ev = await supabase
+      .from("games_events")
+      .select("id,name,subtitle,starts_at")
+      .eq("active", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (!ev.error && ev.data?.id) return ev.data as ActiveEventRow;
+
+    // Fallback view
+    const v = await supabase
       .from("games_active_event")
       .select("id,name,subtitle,starts_at")
       .maybeSingle();
-    if (res.error) throw res.error;
-    return (res.data as ActiveEventRow) ?? null;
+
+    if (v.error) throw v.error;
+    return (v.data as ActiveEventRow) ?? null;
   };
 
   const loadDisciplines = async (eventId: string) => {
@@ -241,6 +272,7 @@ const GamesResults: React.FC = () => {
       .select("id,name,scoring_mode")
       .eq("event_id", eventId)
       .order("name", { ascending: true });
+
     if (res.error) throw res.error;
     setDisciplines((res.data as DisciplineRow[]) ?? []);
   };
@@ -251,6 +283,7 @@ const GamesResults: React.FC = () => {
       .select("id,name")
       .eq("event_id", eventId)
       .order("name", { ascending: true });
+
     if (res.error) throw res.error;
     setTeams((res.data as TeamRow[]) ?? []);
   };
@@ -258,9 +291,11 @@ const GamesResults: React.FC = () => {
   const loadRuns = async (eventId: string) => {
     const res = await supabase
       .from("games_runs")
-      .select("id,discipline_id,name,starts_at,status,created_at")
+      .select("id,discipline_id,name,status,sort_order,scheduled_at,started_at,finished_at,created_at,updated_at")
       .eq("event_id", eventId)
+      .order("sort_order", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: false });
+
     if (res.error) throw res.error;
     setRuns((res.data as RunRow[]) ?? []);
   };
@@ -296,6 +331,7 @@ const GamesResults: React.FC = () => {
     }
   };
 
+  // ---------- RESULTS ----------
   const buildVmRows = (map: Map<string, RunResultRow>) => {
     const vms: RowVM[] = teams.map((t) => {
       const r = map.get(t.id);
@@ -305,7 +341,7 @@ const GamesResults: React.FC = () => {
         timeStr: r?.time_ms != null ? msToMSS(r.time_ms) : "",
         distanceStr: r?.distance != null ? String(r.distance) : "",
         noteStr: r?.note ?? "",
-        achievedAtLocal: toDatetimeLocalValue(r?.achieved_at ?? null),
+        achievedAtLocal: isoToDatetimeLocal(r?.achieved_at ?? null),
         place: r?.place ?? null,
         pointsAwarded: r?.points_awarded ?? null,
         dirty: false,
@@ -326,9 +362,7 @@ const GamesResults: React.FC = () => {
     try {
       const res = await supabase
         .from("games_run_results")
-        .select(
-          "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
-        )
+        .select(SELECT_RESULT)
         .eq("run_id", runId);
 
       if (res.error) throw res.error;
@@ -353,26 +387,19 @@ const GamesResults: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!selectedRunId) {
+    if (!selectedRunId || !activeEvent?.id || teams.length === 0) {
       setResultsByTeam(new Map());
       setVmRows([]);
       return;
     }
-    if (!activeEvent?.id) return;
-    if (teams.length === 0) return;
-
     void loadResultsForRun(selectedRunId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunId, teams.length, activeEvent?.id]);
 
+  // ---------- EDIT ----------
   const updateVmField = (
     teamId: string,
-    field:
-      | "pointsManualStr"
-      | "timeStr"
-      | "distanceStr"
-      | "noteStr"
-      | "achievedAtLocal",
+    field: "pointsManualStr" | "timeStr" | "distanceStr" | "noteStr" | "achievedAtLocal",
     value: string
   ) => {
     setVmRows((prev) =>
@@ -403,7 +430,8 @@ const GamesResults: React.FC = () => {
     }
 
     const note = row.noteStr.trim().length ? row.noteStr.trim() : null;
-    const achieved_at = row.achievedAtLocal ? new Date(row.achievedAtLocal).toISOString() : null;
+    const achieved_at = row.achievedAtLocal ? datetimeLocalToISO(row.achievedAtLocal) : null;
+    if (row.achievedAtLocal && !achieved_at) return { ok: false, error: "achieved_at ungültig." };
 
     return {
       ok: true,
@@ -433,10 +461,7 @@ const GamesResults: React.FC = () => {
     if (!row) return;
 
     const built = buildPayload(row);
-    if (!built.ok) {
-      toast(built.error);
-      return;
-    }
+    if (!built.ok) return toast(built.error);
 
     setVmRows((prev) => prev.map((x) => (x.team.id === teamId ? { ...x, saving: true } : x)));
 
@@ -448,9 +473,7 @@ const GamesResults: React.FC = () => {
           .from("games_run_results")
           .update(built.data)
           .eq("id", existing.id)
-          .select(
-            "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
-          )
+          .select(SELECT_RESULT)
           .single();
 
         if (upd.error) throw upd.error;
@@ -458,9 +481,7 @@ const GamesResults: React.FC = () => {
         const ins = await supabase
           .from("games_run_results")
           .insert(built.data)
-          .select(
-            "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
-          )
+          .select(SELECT_RESULT)
           .single();
 
         if (ins.error) throw ins.error;
@@ -488,7 +509,6 @@ const GamesResults: React.FC = () => {
 
     setGlobalSaving(true);
     try {
-      // bewusst sequenziell: weniger Stress für DB/RLS, leichter zu debuggen
       for (const r of vmRows.filter((x) => x.dirty)) {
         const built = buildPayload(r);
         if (!built.ok) {
@@ -529,6 +549,14 @@ const GamesResults: React.FC = () => {
     return "Modus: distance_best (distance). Eingabe Zahl (z.B. 12.34).";
   }, [scoringMode]);
 
+  const runLabel = (r: RunRow) => {
+    const d = disciplineMap.get(r.discipline_id);
+    const t = r.scheduled_at ?? r.started_at ?? null;
+    const timeTxt = t ? ` · ${formatBerlin(t)}` : "";
+    const nameTxt = r.name ?? "Unbenannter Lauf";
+    return `${nameTxt} · ${d ? d.name : r.discipline_id}${timeTxt}`;
+  };
+
   return (
     <IonPage>
       <IonHeader>
@@ -549,7 +577,6 @@ const GamesResults: React.FC = () => {
 
       <IonContent className="ion-padding">
         <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          {/* CONTEXT */}
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Kontext</div>
@@ -561,9 +588,7 @@ const GamesResults: React.FC = () => {
                   <>
                     <div style={{ fontWeight: 950, fontSize: 18 }}>{activeEvent.name}</div>
                     {activeEvent.subtitle ? (
-                      <div style={{ marginTop: 4, opacity: 0.85, fontWeight: 750 }}>
-                        {activeEvent.subtitle}
-                      </div>
+                      <div style={{ marginTop: 4, opacity: 0.85, fontWeight: 750 }}>{activeEvent.subtitle}</div>
                     ) : null}
                     <div style={{ marginTop: 8, opacity: 0.8, fontWeight: 850 }}>
                       Start: {activeEvent.starts_at ? formatBerlin(activeEvent.starts_at) : "—"}
@@ -571,7 +596,7 @@ const GamesResults: React.FC = () => {
                   </>
                 ) : (
                   <IonNote style={{ display: "block" }}>
-                    Kein aktives Event gefunden. Bitte unter <b>/games/events</b> ein Event aktiv setzen.
+                    Kein aktives Event gefunden. Bitte unter <b>/games/events</b> aktiv setzen.
                   </IonNote>
                 )}
               </div>
@@ -588,17 +613,11 @@ const GamesResults: React.FC = () => {
                     onIonChange={(e) => setSelectedRunId(String(e.detail.value ?? ""))}
                     disabled={!activeEvent || runs.length === 0 || globalSaving}
                   >
-                    {runs.map((r) => {
-                      const d = disciplineMap.get(r.discipline_id);
-                      const label = `${r.name ?? "Unbenannter Lauf"} · ${d ? d.name : r.discipline_id}${
-                        r.starts_at ? ` · ${formatBerlin(r.starts_at)}` : ""
-                      }`;
-                      return (
-                        <IonSelectOption key={r.id} value={r.id}>
-                          {label}
-                        </IonSelectOption>
-                      );
-                    })}
+                    {runs.map((r) => (
+                      <IonSelectOption key={r.id} value={r.id}>
+                        {runLabel(r)}
+                      </IonSelectOption>
+                    ))}
                   </IonSelect>
                 </IonItem>
 
@@ -616,7 +635,6 @@ const GamesResults: React.FC = () => {
             </IonCardContent>
           </IonCard>
 
-          {/* TABLE */}
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Ergebnisse pro Team</div>
@@ -628,25 +646,15 @@ const GamesResults: React.FC = () => {
                 {loading ? (
                   <IonSpinner />
                 ) : !activeEvent ? (
-                  <IonText color="medium">
-                    <p>Bitte zuerst ein Event aktiv setzen.</p>
-                  </IonText>
+                  <IonText color="medium"><p>Bitte zuerst ein Event aktiv setzen.</p></IonText>
                 ) : teams.length === 0 ? (
-                  <IonText color="medium">
-                    <p>Keine Teams vorhanden. Lege zuerst Teams an.</p>
-                  </IonText>
+                  <IonText color="medium"><p>Keine Teams vorhanden. Lege zuerst Teams an.</p></IonText>
                 ) : runs.length === 0 ? (
-                  <IonText color="medium">
-                    <p>Keine Läufe vorhanden. Lege zuerst Läufe an.</p>
-                  </IonText>
+                  <IonText color="medium"><p>Keine Läufe vorhanden. Lege zuerst Läufe an.</p></IonText>
                 ) : !selectedRunId ? (
-                  <IonText color="medium">
-                    <p>Bitte oben einen Lauf auswählen.</p>
-                  </IonText>
+                  <IonText color="medium"><p>Bitte oben einen Lauf auswählen.</p></IonText>
                 ) : vmRows.length === 0 ? (
-                  <IonText color="medium">
-                    <p>Keine Teams geladen.</p>
-                  </IonText>
+                  <IonText color="medium"><p>Keine Teams geladen.</p></IonText>
                 ) : (
                   <IonList lines="inset">
                     {vmRows.map((r) => {
@@ -655,9 +663,8 @@ const GamesResults: React.FC = () => {
 
                       return (
                         <IonItem key={r.team.id} detail={false}>
-                          <IonLabel style={{ minWidth: 200 }}>
+                          <IonLabel style={{ minWidth: 220 }}>
                             <div style={{ fontWeight: 950 }}>{r.team.name}</div>
-
                             <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                               {r.dirty ? (
                                 <IonChip style={{ height: 22, fontWeight: 900 }}>dirty</IonChip>
@@ -679,9 +686,7 @@ const GamesResults: React.FC = () => {
                                 value={r.pointsManualStr}
                                 inputmode="numeric"
                                 placeholder="z.B. 10"
-                                onIonInput={(e) =>
-                                  updateVmField(r.team.id, "pointsManualStr", String(e.detail.value ?? ""))
-                                }
+                                onIonInput={(e) => updateVmField(r.team.id, "pointsManualStr", String(e.detail.value ?? ""))}
                                 disabled={globalSaving || r.saving}
                               />
                             </IonItem>
@@ -692,9 +697,7 @@ const GamesResults: React.FC = () => {
                                 <IonInput
                                   value={r.timeStr}
                                   placeholder='z.B. "1:23"'
-                                  onIonInput={(e) =>
-                                    updateVmField(r.team.id, "timeStr", String(e.detail.value ?? ""))
-                                  }
+                                  onIonInput={(e) => updateVmField(r.team.id, "timeStr", String(e.detail.value ?? ""))}
                                   disabled={globalSaving || r.saving}
                                 />
                               </IonItem>
@@ -707,9 +710,7 @@ const GamesResults: React.FC = () => {
                                   value={r.distanceStr}
                                   inputmode="decimal"
                                   placeholder="z.B. 12.34"
-                                  onIonInput={(e) =>
-                                    updateVmField(r.team.id, "distanceStr", String(e.detail.value ?? ""))
-                                  }
+                                  onIonInput={(e) => updateVmField(r.team.id, "distanceStr", String(e.detail.value ?? ""))}
                                   disabled={globalSaving || r.saving}
                                 />
                               </IonItem>
@@ -720,9 +721,7 @@ const GamesResults: React.FC = () => {
                               <IonInput
                                 value={r.achievedAtLocal}
                                 type="datetime-local"
-                                onIonInput={(e) =>
-                                  updateVmField(r.team.id, "achievedAtLocal", String(e.detail.value ?? ""))
-                                }
+                                onIonInput={(e) => updateVmField(r.team.id, "achievedAtLocal", String(e.detail.value ?? ""))}
                                 disabled={globalSaving || r.saving}
                               />
                             </IonItem>
@@ -732,9 +731,7 @@ const GamesResults: React.FC = () => {
                               <IonInput
                                 value={r.noteStr}
                                 placeholder="Notiz…"
-                                onIonInput={(e) =>
-                                  updateVmField(r.team.id, "noteStr", String(e.detail.value ?? ""))
-                                }
+                                onIonInput={(e) => updateVmField(r.team.id, "noteStr", String(e.detail.value ?? ""))}
                                 disabled={globalSaving || r.saving}
                               />
                             </IonItem>
@@ -762,7 +759,12 @@ const GamesResults: React.FC = () => {
           </IonCard>
         </div>
 
-        <IonToast isOpen={toastOpen} message={toastMsg} duration={3000} onDidDismiss={() => setToastOpen(false)} />
+        <IonToast
+          isOpen={toastOpen}
+          message={toastMsg}
+          duration={3000}
+          onDidDismiss={() => setToastOpen(false)}
+        />
       </IonContent>
     </IonPage>
   );
