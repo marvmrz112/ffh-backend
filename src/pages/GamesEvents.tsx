@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  IonBackButton,
   IonButton,
-  IonButtons,
   IonCard,
   IonCardContent,
   IonContent,
@@ -20,28 +18,38 @@ import {
   IonToolbar,
   IonToast,
 } from "@ionic/react";
-import {
-  addOutline,
-  checkmarkCircleOutline,
-  refreshOutline,
-  timeOutline,
-} from "ionicons/icons";
+import { addOutline, refreshOutline, starOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
 type GamesEventRow = {
   id: string;
   name: string;
   subtitle: string | null;
+  location: string | null;
   starts_at: string | null;
-  is_active: boolean | null;
-  created_at?: string | null;
+  ends_at: string | null;
+  active: boolean | null;
+  public_visible: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
+
+type CreateForm = {
+  name: string;
+  subtitle: string;
+  location: string;
+  startsAt: string; // datetime-local
+  endsAt: string; // datetime-local
+  publicVisible: boolean;
+};
+
+const TZ = "Europe/Berlin";
 
 function formatBerlin(ts?: string | null) {
   if (!ts) return "";
   try {
     return new Intl.DateTimeFormat("de-DE", {
-      timeZone: "Europe/Berlin",
+      timeZone: TZ,
       weekday: "short",
       day: "2-digit",
       month: "2-digit",
@@ -53,121 +61,148 @@ function formatBerlin(ts?: string | null) {
   }
 }
 
+function toIsoOrNull(datetimeLocal: string): string | null {
+  const v = (datetimeLocal ?? "").trim();
+  if (!v) return null;
+
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+
+  return d.toISOString();
+}
+
 const GamesEvents: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [activatingId, setActivatingId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<GamesEventRow[]>([]);
 
-  // Create form
-  const [name, setName] = useState("");
-  const [subtitle, setSubtitle] = useState("");
-  const [startsAt, setStartsAt] = useState<string>("");
-
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
-
   const toast = (msg: string) => {
     setToastMsg(msg);
     setToastOpen(true);
   };
 
-  const canCreate = useMemo(() => {
-    return name.trim().length >= 3 && !saving && !loading;
-  }, [name, saving, loading]);
+  const [form, setForm] = useState<CreateForm>({
+    name: "",
+    subtitle: "",
+    location: "",
+    startsAt: "",
+    endsAt: "",
+    publicVisible: true,
+  });
 
-  const resetForm = () => {
-    setName("");
-    setSubtitle("");
-    setStartsAt("");
-  };
+  const canCreate = useMemo(() => form.name.trim().length > 0, [form.name]);
 
   const load = async () => {
     setLoading(true);
 
     const res = await supabase
       .from("games_events")
-      .select("id,name,subtitle,starts_at,is_active,created_at")
-      .order("starts_at", { ascending: true, nullsFirst: false });
+      .select(
+        "id,name,subtitle,location,starts_at,ends_at,active,public_visible,created_at,updated_at"
+      )
+      .order("created_at", { ascending: false });
+
+    setLoading(false);
 
     if (res.error) {
       toast(`Load Fehler: ${res.error.message}`);
       setRows([]);
-      setLoading(false);
       return;
     }
 
     setRows((res.data as GamesEventRow[]) ?? []);
-    setLoading(false);
+  };
+
+  const resetForm = () => {
+    setForm({
+      name: "",
+      subtitle: "",
+      location: "",
+      startsAt: "",
+      endsAt: "",
+      publicVisible: true,
+    });
   };
 
   const createEvent = async () => {
-    const n = name.trim();
-    const s = subtitle.trim();
-    if (n.length < 3) {
-      toast("Name ist zu kurz (mind. 3 Zeichen).");
-      return;
-    }
+    if (!canCreate) return;
 
     setSaving(true);
+    try {
+      const payload = {
+        name: form.name.trim(),
+        subtitle: form.subtitle.trim() ? form.subtitle.trim() : null,
+        location: form.location.trim() ? form.location.trim() : null,
+        starts_at: toIsoOrNull(form.startsAt),
+        ends_at: toIsoOrNull(form.endsAt),
+        public_visible: !!form.publicVisible,
+        active: false,
+        updated_at: new Date().toISOString(),
+      };
 
-    // starts_at: if user entered empty -> null
-    const payload = {
-      name: n,
-      subtitle: s.length ? s : null,
-      starts_at: startsAt ? new Date(startsAt).toISOString() : null,
-      is_active: false,
-    };
+      const ins = await supabase
+        .from("games_events")
+        .insert(payload)
+        .select(
+          "id,name,subtitle,location,starts_at,ends_at,active,public_visible,created_at,updated_at"
+        )
+        .single();
 
-    const res = await supabase
-      .from("games_events")
-      .insert(payload)
-      .select("id,name,subtitle,starts_at,is_active,created_at")
-      .single();
+      if (ins.error) throw ins.error;
 
-    setSaving(false);
-
-    if (res.error) {
-      toast(`Create Fehler: ${res.error.message}`);
-      return;
+      toast("Event angelegt.");
+      resetForm();
+      await load();
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      const lower = String(msg).toLowerCase();
+      if (lower.includes("row-level security") || lower.includes("policy")) {
+        toast("Create geblockt: RLS/Policy verhindert INSERT auf games_events.");
+      } else {
+        toast(`Create Fehler: ${msg}`);
+      }
+    } finally {
+      setSaving(false);
     }
-
-    toast("Event angelegt.");
-    resetForm();
-    await load();
   };
 
   const setActive = async (eventId: string) => {
-    setActivatingId(eventId);
+    setSaving(true);
+    try {
+      // 1) alle deaktivieren
+      const off = await supabase
+        .from("games_events")
+        .update({ active: false, updated_at: new Date().toISOString() })
+        .eq("active", true);
 
-    // 1) deactivate all others
-    const off = await supabase
-      .from("games_events")
-      .update({ is_active: false })
-      .neq("id", eventId);
+      if (off.error) throw off.error;
 
-    if (off.error) {
-      setActivatingId(null);
-      toast(`Aktivieren fehlgeschlagen (Step 1): ${off.error.message}`);
-      return;
+      // 2) gewünschtes aktivieren
+      const on = await supabase
+        .from("games_events")
+        .update({ active: true, updated_at: new Date().toISOString() })
+        .eq("id", eventId);
+
+      if (on.error) throw on.error;
+
+      toast("Event aktiv gesetzt.");
+      await load();
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      const lower = String(msg).toLowerCase();
+      if (lower.includes("row-level security") || lower.includes("policy")) {
+        toast("Aktiv setzen geblockt: RLS/Policy verhindert UPDATE auf games_events.");
+      } else if (lower.includes("schema cache") || lower.includes("could not find")) {
+        toast("Schema-Cache: `notify pgrst, 'reload schema';` ausführen und hart neu laden.");
+      } else {
+        toast(`Aktiv setzen Fehler: ${msg}`);
+      }
+    } finally {
+      setSaving(false);
     }
-
-    // 2) activate selected
-    const on = await supabase
-      .from("games_events")
-      .update({ is_active: true })
-      .eq("id", eventId);
-
-    setActivatingId(null);
-
-    if (on.error) {
-      toast(`Aktivieren fehlgeschlagen (Step 2): ${on.error.message}`);
-      return;
-    }
-
-    toast("Aktives Event gesetzt.");
-    await load();
   };
 
   useEffect(() => {
@@ -178,37 +213,39 @@ const GamesEvents: React.FC = () => {
     <IonPage>
       <IonHeader>
         <IonToolbar>
-          <IonButtons slot="start">
-            <IonBackButton defaultHref="/games" />
-          </IonButtons>
-
           <IonTitle>Games · Events</IonTitle>
 
-          <IonButtons slot="end">
-            <IonButton onClick={() => void load()} disabled={loading || saving}>
-              <IonIcon icon={refreshOutline} slot="icon-only" />
-            </IonButton>
-          </IonButtons>
+          <IonButton
+            slot="end"
+            fill="clear"
+            onClick={() => void load()}
+            disabled={loading || saving}
+            aria-label="Reload"
+          >
+            <IonIcon icon={refreshOutline} slot="icon-only" />
+          </IonButton>
         </IonToolbar>
       </IonHeader>
 
       <IonContent className="ion-padding">
-        <div style={{ maxWidth: 980, margin: "0 auto" }}>
+        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
           {/* CREATE */}
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
-              <div style={{ fontWeight: 950, fontSize: 16, display: "flex", alignItems: "center", gap: 10 }}>
-                <IonIcon icon={addOutline} />
-                Neues Event anlegen
-              </div>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>Neues Event</div>
+              <IonNote style={{ display: "block", marginTop: 6 }}>
+                Tipp: Danach „Aktiv setzen“, damit <b>games_active_event</b> eine Zeile liefert.
+              </IonNote>
 
-              <div style={{ marginTop: 12 }}>
+              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
                 <IonItem>
                   <IonLabel position="stacked">Name</IonLabel>
                   <IonInput
-                    value={name}
-                    placeholder="z. B. Feuerwehrspiele 2026"
-                    onIonInput={(e) => setName(String(e.detail.value ?? ""))}
+                    value={form.name}
+                    placeholder="z.B. FFH Spiele 2026"
+                    onIonInput={(e) =>
+                      setForm((p) => ({ ...p, name: String(e.detail.value ?? "") }))
+                    }
                     disabled={saving}
                   />
                 </IonItem>
@@ -216,40 +253,61 @@ const GamesEvents: React.FC = () => {
                 <IonItem>
                   <IonLabel position="stacked">Untertitel (optional)</IonLabel>
                   <IonInput
-                    value={subtitle}
-                    placeholder="z. B. Live-Tabelle & Platzierungen"
-                    onIonInput={(e) => setSubtitle(String(e.detail.value ?? ""))}
+                    value={form.subtitle}
+                    placeholder="z.B. Live-Tabelle & Platzierungen"
+                    onIonInput={(e) =>
+                      setForm((p) => ({ ...p, subtitle: String(e.detail.value ?? "") }))
+                    }
                     disabled={saving}
                   />
                 </IonItem>
 
                 <IonItem>
-                  <IonLabel position="stacked">
-                    Start (optional){" "}
-                    <IonNote style={{ display: "inline" }}>
-                      (wird als ISO gespeichert)
-                    </IonNote>
-                  </IonLabel>
+                  <IonLabel position="stacked">Ort (optional)</IonLabel>
                   <IonInput
-                    value={startsAt}
-                    type="datetime-local"
-                    onIonInput={(e) => setStartsAt(String(e.detail.value ?? ""))}
+                    value={form.location}
+                    placeholder="z.B. Hornau"
+                    onIonInput={(e) =>
+                      setForm((p) => ({ ...p, location: String(e.detail.value ?? "") }))
+                    }
                     disabled={saving}
                   />
                 </IonItem>
 
-                <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
-                  <IonButton onClick={() => void createEvent()} disabled={!canCreate}>
+                <IonItem>
+                  <IonLabel position="stacked">Start (optional) (ISO)</IonLabel>
+                  <IonInput
+                    type="datetime-local"
+                    value={form.startsAt}
+                    onIonInput={(e) =>
+                      setForm((p) => ({ ...p, startsAt: String(e.detail.value ?? "") }))
+                    }
+                    disabled={saving}
+                  />
+                </IonItem>
+
+                <IonItem>
+                  <IonLabel position="stacked">Ende (optional) (ISO)</IonLabel>
+                  <IonInput
+                    type="datetime-local"
+                    value={form.endsAt}
+                    onIonInput={(e) =>
+                      setForm((p) => ({ ...p, endsAt: String(e.detail.value ?? "") }))
+                    }
+                    disabled={saving}
+                  />
+                </IonItem>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
+                  <IonButton onClick={() => void createEvent()} disabled={!canCreate || saving}>
+                    <IonIcon icon={addOutline} slot="start" />
                     Anlegen
                   </IonButton>
+
                   <IonButton fill="outline" onClick={resetForm} disabled={saving}>
                     Zurücksetzen
                   </IonButton>
                 </div>
-
-                <IonNote style={{ display: "block", marginTop: 10 }}>
-                  Tipp: Danach „Aktiv setzen“, damit <b>games_active_event</b> eine Zeile liefert.
-                </IonNote>
               </div>
             </IonCardContent>
           </IonCard>
@@ -259,7 +317,7 @@ const GamesEvents: React.FC = () => {
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Events</div>
               <IonNote style={{ display: "block", marginTop: 6 }}>
-                Setze genau ein Event aktiv (is_active=true).
+                Setze genau ein Event aktiv (<b>active=true</b>).
               </IonNote>
 
               <div style={{ marginTop: 12 }}>
@@ -271,77 +329,53 @@ const GamesEvents: React.FC = () => {
                   </IonText>
                 ) : (
                   <IonList lines="inset">
-                    {rows.map((e) => {
-                      const isActive = !!e.is_active;
-                      const busy = activatingId === e.id;
+                    {rows.map((r) => (
+                      <IonItem key={r.id} detail={false}>
+                        <IonLabel>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                            <div style={{ fontWeight: 950 }}>{r.name}</div>
 
-                      return (
-                        <IonItem key={e.id} detail={false}>
-                          <IonLabel style={{ minWidth: 0 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <div style={{ fontWeight: 950, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis" }}>
-                                {e.name}
-                              </div>
+                            {r.active ? (
+                              <IonNote style={{ fontWeight: 900 }}>AKTIV</IonNote>
+                            ) : (
+                              <IonNote style={{ opacity: 0.7 }}>inaktiv</IonNote>
+                            )}
 
-                              {isActive ? (
-                                <span
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 900,
-                                    padding: "4px 8px",
-                                    borderRadius: 999,
-                                    background: "rgba(46, 204, 113, 0.15)",
-                                  }}
-                                >
-                                  AKTIV
-                                </span>
-                              ) : null}
-                            </div>
-
-                            {e.subtitle ? (
-                              <div style={{ marginTop: 4, opacity: 0.8, fontWeight: 750, overflow: "hidden", textOverflow: "ellipsis" }}>
-                                {e.subtitle}
-                              </div>
-                            ) : null}
-
-                            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, opacity: 0.85 }}>
-                              <IonIcon icon={timeOutline} />
-                              <IonNote>
-                                {e.starts_at ? formatBerlin(e.starts_at) : "kein Startdatum"}
-                              </IonNote>
-                            </div>
-                          </IonLabel>
-
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <IonButton
-                              size="small"
-                              fill={isActive ? "solid" : "outline"}
-                              color={isActive ? "success" : undefined}
-                              disabled={saving || loading || isActive || busy}
-                              onClick={() => void setActive(e.id)}
-                            >
-                              {busy ? (
-                                <>
-                                  <IonSpinner name="dots" />
-                                </>
-                              ) : (
-                                <>
-                                  <IonIcon icon={checkmarkCircleOutline} slot="start" />
-                                  Aktiv setzen
-                                </>
-                              )}
-                            </IonButton>
+                            {r.public_visible ? (
+                              <IonNote style={{ fontWeight: 900 }}>public</IonNote>
+                            ) : (
+                              <IonNote style={{ opacity: 0.7 }}>hidden</IonNote>
+                            )}
                           </div>
-                        </IonItem>
-                      );
-                    })}
+
+                          {r.subtitle ? (
+                            <div style={{ marginTop: 4, opacity: 0.85 }}>{r.subtitle}</div>
+                          ) : null}
+
+                          <div style={{ marginTop: 6, opacity: 0.8, fontSize: 12.5 }}>
+                            Start: {r.starts_at ? formatBerlin(r.starts_at) : "—"} · Ende:{" "}
+                            {r.ends_at ? formatBerlin(r.ends_at) : "—"} · Ort: {r.location ?? "—"}
+                          </div>
+                        </IonLabel>
+
+                        <IonButton
+                          size="small"
+                          onClick={() => void setActive(r.id)}
+                          disabled={saving}
+                          style={{ marginLeft: 10 }}
+                        >
+                          <IonIcon icon={starOutline} slot="start" />
+                          Aktiv setzen
+                        </IonButton>
+                      </IonItem>
+                    ))}
                   </IonList>
                 )}
-              </div>
 
-              <IonNote style={{ display: "block", marginTop: 10 }}>
-                Falls „Aktiv setzen“ fehlschlägt: sehr wahrscheinlich RLS/Policy auf <b>games_events</b>.
-              </IonNote>
+                <IonNote style={{ display: "block", marginTop: 10 }}>
+                  Wenn „Aktiv setzen“ fehlschlägt: sehr wahrscheinlich RLS/Policy auf <b>games_events</b>.
+                </IonNote>
+              </div>
             </IonCardContent>
           </IonCard>
         </div>
@@ -349,7 +383,7 @@ const GamesEvents: React.FC = () => {
         <IonToast
           isOpen={toastOpen}
           message={toastMsg}
-          duration={3000}
+          duration={3500}
           onDidDismiss={() => setToastOpen(false)}
         />
       </IonContent>
