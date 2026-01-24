@@ -27,6 +27,11 @@ import {
 import { addOutline, refreshOutline, trashOutline, playOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
+/**
+ * Admin backend: DO NOT depend on games_active_event view.
+ * Always read active event directly from games_events (active=true).
+ */
+
 type ActiveEventRow = {
   id: string;
   name: string;
@@ -41,6 +46,7 @@ type DisciplineRow = {
   event_id: string;
   name: string;
   scoring_mode: ScoringMode;
+  // optional in DB; we handle missing column gracefully
   sort_order?: number | null;
 };
 
@@ -54,6 +60,7 @@ type RunRow = {
   starts_at: string | null;
   status: RunStatus | string | null;
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
 function formatBerlin(ts?: string | null) {
@@ -72,6 +79,19 @@ function formatBerlin(ts?: string | null) {
   }
 }
 
+function toIsoOrNull(datetimeLocal: string): string | null {
+  const v = (datetimeLocal ?? "").trim();
+  if (!v) return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function isRlsError(msg?: string) {
+  const m = (msg ?? "").toLowerCase();
+  return m.includes("row-level security") || m.includes("rls") || m.includes("policy");
+}
+
 const GamesRuns: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -86,11 +106,11 @@ const GamesRuns: React.FC = () => {
   const [startsAtLocal, setStartsAtLocal] = useState<string>("");
   const [status, setStatus] = useState<RunStatus>("scheduled");
 
-  // Delete
-  const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [deleteName, setDeleteName] = useState<string>("");
+  // Delete confirm
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
+  // Toast
   const [toastOpen, setToastOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
   const toast = (msg: string) => {
@@ -109,27 +129,22 @@ const GamesRuns: React.FC = () => {
     setStatus("scheduled");
   };
 
-  /**
-   * IMPORTANT:
-   * Do NOT depend on games_active_event view here.
-   * Load active event directly from games_events where active=true.
-   */
   const loadActiveEvent = async (): Promise<ActiveEventRow | null> => {
-    // Primary: direct query on table
     const res = await supabase
       .from("games_events")
-      .select("id,name,subtitle,starts_at")
+      .select("id,name,subtitle,starts_at,updated_at,created_at")
       .eq("active", true)
       .order("updated_at", { ascending: false })
+      .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
     if (res.error) throw res.error;
-    return (res.data as ActiveEventRow) ?? null;
+    return (res.data as any as ActiveEventRow) ?? null;
   };
 
   const loadDisciplines = async (eventId: string) => {
-    // Try with sort_order (if column exists)
+    // Try with sort_order; fallback if column not present
     const withSort = await supabase
       .from("games_disciplines")
       .select("id,event_id,name,scoring_mode,sort_order")
@@ -142,7 +157,6 @@ const GamesRuns: React.FC = () => {
       return;
     }
 
-    // Fallback: if sort_order column doesn't exist -> query without it
     const msg = withSort.error.message?.toLowerCase?.() ?? "";
     if (msg.includes("sort_order") || msg.includes("does not exist")) {
       const fallback = await supabase
@@ -162,7 +176,7 @@ const GamesRuns: React.FC = () => {
   const loadRuns = async (eventId: string) => {
     const res = await supabase
       .from("games_runs")
-      .select("id,event_id,discipline_id,name,starts_at,status,created_at")
+      .select("id,event_id,discipline_id,name,starts_at,status,created_at,updated_at")
       .eq("event_id", eventId)
       .order("created_at", { ascending: false });
 
@@ -184,7 +198,8 @@ const GamesRuns: React.FC = () => {
 
       await Promise.all([loadDisciplines(ev.id), loadRuns(ev.id)]);
     } catch (e: any) {
-      toast(`Load Fehler: ${e?.message ?? "Unbekannt"}`);
+      const msg = e?.message ?? "Unbekannt";
+      toast(`Load Fehler: ${msg}`);
       setActiveEvent(null);
       setDisciplines([]);
       setRuns([]);
@@ -195,7 +210,7 @@ const GamesRuns: React.FC = () => {
 
   const createRun = async () => {
     if (!activeEvent?.id) {
-      toast("Kein aktives Event. Bitte zuerst unter Events ein Event aktiv setzen.");
+      toast("Kein aktives Event. Bitte zuerst unter /games/events ein Event aktiv setzen.");
       return;
     }
     if (!disciplineId) {
@@ -204,32 +219,34 @@ const GamesRuns: React.FC = () => {
     }
 
     setSaving(true);
+    try {
+      const payload = {
+        event_id: activeEvent.id,
+        discipline_id: disciplineId,
+        name: runName.trim().length ? runName.trim() : null,
+        starts_at: toIsoOrNull(startsAtLocal),
+        status: status ?? "scheduled",
+        updated_at: new Date().toISOString(),
+      };
 
-    const payload = {
-      event_id: activeEvent.id,
-      discipline_id: disciplineId,
-      name: runName.trim().length ? runName.trim() : null,
-      starts_at: startsAtLocal ? new Date(startsAtLocal).toISOString() : null,
-      status: status ?? "scheduled",
-      updated_at: new Date().toISOString(),
-    };
+      const res = await supabase
+        .from("games_runs")
+        .insert(payload)
+        .select("id,event_id,discipline_id,name,starts_at,status,created_at,updated_at")
+        .single();
 
-    const res = await supabase
-      .from("games_runs")
-      .insert(payload)
-      .select("id,event_id,discipline_id,name,starts_at,status,created_at")
-      .single();
+      if (res.error) throw res.error;
 
-    setSaving(false);
-
-    if (res.error) {
-      toast(`Create Fehler: ${res.error.message}`);
-      return;
+      toast("Lauf angelegt.");
+      resetForm();
+      await loadRuns(activeEvent.id);
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      if (isRlsError(msg)) toast(`Create geblockt (RLS/Policy): ${msg}`);
+      else toast(`Create Fehler: ${msg}`);
+    } finally {
+      setSaving(false);
     }
-
-    toast("Lauf angelegt.");
-    resetForm();
-    await loadRuns(activeEvent.id);
   };
 
   const disciplineMap = useMemo(() => {
@@ -239,45 +256,40 @@ const GamesRuns: React.FC = () => {
   }, [disciplines]);
 
   const askDelete = (r: RunRow) => {
-    setDeleteId(r.id);
-    setDeleteName(r.name ?? "Unbenannter Lauf");
+    setDeleteTarget({ id: r.id, name: r.name ?? "Unbenannter Lauf" });
     setConfirmOpen(true);
   };
 
   const deleteRun = async () => {
-    if (!deleteId) return;
+    if (!deleteTarget?.id) return;
 
     setSaving(true);
-
-    const res = await supabase.from("games_runs").delete().eq("id", deleteId);
-
-    setSaving(false);
     setConfirmOpen(false);
 
-    if (res.error) {
-      toast(`Delete Fehler: ${res.error.message}`);
-      return;
-    }
+    try {
+      const res = await supabase.from("games_runs").delete().eq("id", deleteTarget.id);
+      if (res.error) throw res.error;
 
-    toast("Lauf gelöscht.");
-    setDeleteId(null);
-    setDeleteName("");
+      toast("Lauf gelöscht.");
+      setDeleteTarget(null);
 
-    if (activeEvent?.id) {
-      await loadRuns(activeEvent.id);
-    } else {
-      await loadAll();
+      if (activeEvent?.id) await loadRuns(activeEvent.id);
+      else await loadAll();
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      if (isRlsError(msg)) toast(`Delete geblockt (RLS/Policy): ${msg}`);
+      else if ((msg ?? "").toLowerCase().includes("foreign key"))
+        toast("Delete nicht möglich: Es hängen noch Ergebnisse an diesem Lauf (FK). Erst Results löschen.");
+      else toast(`Delete Fehler: ${msg}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const statusChip = (s?: string | null) => {
     const val = (s ?? "").toLowerCase();
     const label = val === "running" ? "running" : val === "done" ? "done" : "scheduled";
-    return (
-      <IonChip style={{ height: 22, fontWeight: 900, opacity: 0.9 }}>
-        {label}
-      </IonChip>
-    );
+    return <IonChip style={{ height: 22, fontWeight: 900, opacity: 0.9 }}>{label}</IonChip>;
   };
 
   useEffect(() => {
@@ -320,9 +332,7 @@ const GamesRuns: React.FC = () => {
                   <>
                     <div style={{ fontWeight: 950, fontSize: 18 }}>{activeEvent.name}</div>
                     {activeEvent.subtitle ? (
-                      <div style={{ marginTop: 4, opacity: 0.85, fontWeight: 750 }}>
-                        {activeEvent.subtitle}
-                      </div>
+                      <div style={{ marginTop: 4, opacity: 0.85, fontWeight: 750 }}>{activeEvent.subtitle}</div>
                     ) : null}
                     <div style={{ marginTop: 8, opacity: 0.8, fontWeight: 850 }}>
                       Start: {activeEvent.starts_at ? formatBerlin(activeEvent.starts_at) : "—"}
@@ -452,7 +462,14 @@ const GamesRuns: React.FC = () => {
                         <IonItem key={r.id} detail={false}>
                           <IonLabel style={{ minWidth: 0 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <div style={{ fontWeight: 950, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <div
+                                style={{
+                                  fontWeight: 950,
+                                  fontSize: 16,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                }}
+                              >
                                 {r.name ?? "Unbenannter Lauf"}
                               </div>
                               {statusChip(r.status)}
@@ -468,13 +485,7 @@ const GamesRuns: React.FC = () => {
                             </div>
                           </IonLabel>
 
-                          <IonButton
-                            size="small"
-                            color="danger"
-                            fill="outline"
-                            disabled={saving}
-                            onClick={() => askDelete(r)}
-                          >
+                          <IonButton size="small" color="danger" fill="outline" disabled={saving} onClick={() => askDelete(r)}>
                             <IonIcon icon={trashOutline} slot="icon-only" />
                           </IonButton>
                         </IonItem>
@@ -495,19 +506,14 @@ const GamesRuns: React.FC = () => {
           isOpen={confirmOpen}
           onDidDismiss={() => setConfirmOpen(false)}
           header="Lauf löschen?"
-          message={`Willst du "${deleteName}" wirklich löschen?`}
+          message={`Willst du "${deleteTarget?.name ?? ""}" wirklich löschen?`}
           buttons={[
             { text: "Abbrechen", role: "cancel" },
             { text: "Löschen", role: "destructive", handler: () => void deleteRun() },
           ]}
         />
 
-        <IonToast
-          isOpen={toastOpen}
-          message={toastMsg}
-          duration={3000}
-          onDidDismiss={() => setToastOpen(false)}
-        />
+        <IonToast isOpen={toastOpen} message={toastMsg} duration={3200} onDidDismiss={() => setToastOpen(false)} />
       </IonContent>
     </IonPage>
   );
