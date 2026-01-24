@@ -5,9 +5,11 @@ import {
   IonButtons,
   IonCard,
   IonCardContent,
+  IonChip,
   IonContent,
   IonHeader,
   IonIcon,
+  IonInput,
   IonItem,
   IonLabel,
   IonList,
@@ -20,8 +22,6 @@ import {
   IonTitle,
   IonToolbar,
   IonToast,
-  IonInput,
-  IonChip,
 } from "@ionic/react";
 import { refreshOutline, saveOutline, createOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
@@ -52,21 +52,42 @@ type RunRow = {
   name: string | null;
   starts_at: string | null;
   status: string | null;
+  created_at?: string | null;
 };
 
 type RunResultRow = {
+  id: string;
+  event_id: string;
+  discipline_id: string;
   run_id: string;
   team_id: string;
-  points: number | null;
+
+  points_manual: number | null;
   time_ms: number | null;
-  distance_mm: number | null;
+  distance: number | null;
+
+  achieved_at: string | null;
+  note: string | null;
+
+  place: number | null;
+  points_awarded: number | null;
+
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 type RowVM = {
   team: TeamRow;
-  pointsStr: string;
+
+  pointsManualStr: string;
   timeStr: string;
-  distStr: string;
+  distanceStr: string;
+  noteStr: string;
+  achievedAtLocal: string;
+
+  place: number | null;
+  pointsAwarded: number | null;
+
   dirty: boolean;
   saving: boolean;
 };
@@ -87,6 +108,18 @@ function formatBerlin(ts?: string | null) {
   }
 }
 
+function toDatetimeLocalValue(iso?: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
 function parseIntOrNull(v: string): number | null {
   const s = v.trim();
   if (!s) return null;
@@ -95,8 +128,16 @@ function parseIntOrNull(v: string): number | null {
   return Math.trunc(n);
 }
 
+function parseFloatOrNull(v: string): number | null {
+  const s = v.trim();
+  if (!s) return null;
+  const n = Number(s.replace(",", "."));
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
 function parseMsFromMSS(v: string): number | null {
-  // accepts "m:ss", "mm:ss", "ss", "ss.sss" (treated as seconds), or plain ms if big
+  // accepts "m:ss", "mm:ss", "ss", "ss.sss" (seconds), or big integer as ms
   const s = v.trim();
   if (!s) return null;
 
@@ -105,18 +146,14 @@ function parseMsFromMSS(v: string): number | null {
     const m = Number(mStr);
     const sec = Number(secStr.replace(",", "."));
     if (!Number.isFinite(m) || !Number.isFinite(sec)) return null;
-    const ms = Math.round((m * 60 + sec) * 1000);
-    return ms;
+    return Math.round((m * 60 + sec) * 1000);
   }
 
-  // If it's a large integer (>= 1000), assume ms
   const n = Number(s.replace(",", "."));
   if (!Number.isFinite(n)) return null;
 
-  if (n >= 1000 && Number.isInteger(n)) return Math.trunc(n);
-
-  // otherwise assume seconds
-  return Math.round(n * 1000);
+  if (n >= 1000 && Number.isInteger(n)) return Math.trunc(n); // treat as ms
+  return Math.round(n * 1000); // treat as seconds
 }
 
 function msToMSS(ms?: number | null): string {
@@ -126,6 +163,28 @@ function msToMSS(ms?: number | null): string {
   const s = totalSeconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
+
+type BuildPayloadOk = {
+  ok: true;
+  data: {
+    event_id: string;
+    discipline_id: string;
+    run_id: string;
+    team_id: string;
+
+    points_manual: number | null;
+    time_ms: number | null;
+    distance: number | null;
+
+    achieved_at: string | null;
+    note: string | null;
+
+    updated_at: string;
+  };
+};
+
+type BuildPayloadErr = { ok: false; error: string };
+type BuildPayloadRes = BuildPayloadOk | BuildPayloadErr;
 
 const GamesResults: React.FC = () => {
   const [loading, setLoading] = useState(true);
@@ -155,7 +214,10 @@ const GamesResults: React.FC = () => {
     return m;
   }, [disciplines]);
 
-  const selectedRun = useMemo(() => runs.find((r) => r.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const selectedRun = useMemo(
+    () => runs.find((r) => r.id === selectedRunId) ?? null,
+    [runs, selectedRunId]
+  );
 
   const scoringMode: ScoringMode | null = useMemo(() => {
     if (!selectedRun) return null;
@@ -169,19 +231,16 @@ const GamesResults: React.FC = () => {
       .from("games_active_event")
       .select("id,name,subtitle,starts_at")
       .maybeSingle();
-
     if (res.error) throw res.error;
     return (res.data as ActiveEventRow) ?? null;
   };
 
   const loadDisciplines = async (eventId: string) => {
-    // sort_order may exist; if not, remove order below
     const res = await supabase
       .from("games_disciplines")
       .select("id,name,scoring_mode")
       .eq("event_id", eventId)
       .order("name", { ascending: true });
-
     if (res.error) throw res.error;
     setDisciplines((res.data as DisciplineRow[]) ?? []);
   };
@@ -192,7 +251,6 @@ const GamesResults: React.FC = () => {
       .select("id,name")
       .eq("event_id", eventId)
       .order("name", { ascending: true });
-
     if (res.error) throw res.error;
     setTeams((res.data as TeamRow[]) ?? []);
   };
@@ -203,7 +261,6 @@ const GamesResults: React.FC = () => {
       .select("id,discipline_id,name,starts_at,status,created_at")
       .eq("event_id", eventId)
       .order("created_at", { ascending: false });
-
     if (res.error) throw res.error;
     setRuns((res.data as RunRow[]) ?? []);
   };
@@ -239,8 +296,27 @@ const GamesResults: React.FC = () => {
     }
   };
 
+  const buildVmRows = (map: Map<string, RunResultRow>) => {
+    const vms: RowVM[] = teams.map((t) => {
+      const r = map.get(t.id);
+      return {
+        team: t,
+        pointsManualStr: r?.points_manual != null ? String(r.points_manual) : "",
+        timeStr: r?.time_ms != null ? msToMSS(r.time_ms) : "",
+        distanceStr: r?.distance != null ? String(r.distance) : "",
+        noteStr: r?.note ?? "",
+        achievedAtLocal: toDatetimeLocalValue(r?.achieved_at ?? null),
+        place: r?.place ?? null,
+        pointsAwarded: r?.points_awarded ?? null,
+        dirty: false,
+        saving: false,
+      };
+    });
+    setVmRows(vms);
+  };
+
   const loadResultsForRun = async (runId: string) => {
-    if (!runId) {
+    if (!runId || !activeEvent?.id) {
       setResultsByTeam(new Map());
       setVmRows([]);
       return;
@@ -250,29 +326,18 @@ const GamesResults: React.FC = () => {
     try {
       const res = await supabase
         .from("games_run_results")
-        .select("run_id,team_id,points,time_ms,distance_mm")
+        .select(
+          "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
+        )
         .eq("run_id", runId);
 
       if (res.error) throw res.error;
 
       const map = new Map<string, RunResultRow>();
-      (res.data as RunResultRow[] | null)?.forEach((r) => map.set(r.team_id, r));
+      ((res.data as RunResultRow[]) ?? []).forEach((r) => map.set(r.team_id, r));
+
       setResultsByTeam(map);
-
-      // Build VM rows for all teams (even without result yet)
-      const vms: RowVM[] = teams.map((t) => {
-        const r = map.get(t.id);
-        return {
-          team: t,
-          pointsStr: r?.points != null ? String(r.points) : "",
-          timeStr: r?.time_ms != null ? msToMSS(r.time_ms) : "",
-          distStr: r?.distance_mm != null ? String(r.distance_mm) : "",
-          dirty: false,
-          saving: false,
-        };
-      });
-
-      setVmRows(vms);
+      buildVmRows(map);
     } catch (e: any) {
       toast(`Results Load Fehler: ${e?.message ?? "Unbekannt"}`);
       setResultsByTeam(new Map());
@@ -287,103 +352,122 @@ const GamesResults: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reload results when run changes (and teams already loaded)
   useEffect(() => {
     if (!selectedRunId) {
       setResultsByTeam(new Map());
       setVmRows([]);
       return;
     }
-    // Only load if teams are present (VM relies on teams)
+    if (!activeEvent?.id) return;
     if (teams.length === 0) return;
+
     void loadResultsForRun(selectedRunId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRunId, teams.length]);
+  }, [selectedRunId, teams.length, activeEvent?.id]);
 
-  const updateVmField = (teamId: string, field: "pointsStr" | "timeStr" | "distStr", value: string) => {
+  const updateVmField = (
+    teamId: string,
+    field:
+      | "pointsManualStr"
+      | "timeStr"
+      | "distanceStr"
+      | "noteStr"
+      | "achievedAtLocal",
+    value: string
+  ) => {
     setVmRows((prev) =>
-      prev.map((r) => {
-        if (r.team.id !== teamId) return r;
-        return { ...r, [field]: value, dirty: true };
-      })
+      prev.map((r) => (r.team.id === teamId ? { ...r, [field]: value, dirty: true } : r))
     );
   };
 
-  const buildUpsertPayload = (r: RowVM): RunResultRow | null => {
-    if (!selectedRunId) return null;
+  const buildPayload = (row: RowVM): BuildPayloadRes => {
+    if (!activeEvent?.id) return { ok: false, error: "Kein aktives Event." };
+    if (!selectedRun) return { ok: false, error: "Bitte zuerst einen Lauf auswählen." };
 
-    const points = parseIntOrNull(r.pointsStr);
-    const time_ms = scoringMode === "time_best" ? parseMsFromMSS(r.timeStr) : null;
-    const distance_mm = scoringMode === "distance_best" ? parseIntOrNull(r.distStr) : null;
+    const points_manual = parseIntOrNull(row.pointsManualStr);
 
-    // If user typed something invalid (e.g., time parse fails)
-    if (scoringMode === "time_best" && r.timeStr.trim().length > 0 && time_ms == null) return null;
-    if (scoringMode === "distance_best" && r.distStr.trim().length > 0 && distance_mm == null) return null;
+    let time_ms: number | null = null;
+    if (scoringMode === "time_best") {
+      time_ms = row.timeStr.trim().length ? parseMsFromMSS(row.timeStr) : null;
+      if (row.timeStr.trim().length > 0 && time_ms == null) {
+        return { ok: false, error: 'Zeit-Format ungültig (z.B. "1:23" oder "83.5").' };
+      }
+    }
 
-    // Save even if all are null? That would create empty rows. Better: if all are null -> return null and delete instead.
-    const allNull = points == null && time_ms == null && distance_mm == null;
-    if (allNull) return null;
+    let distance: number | null = null;
+    if (scoringMode === "distance_best") {
+      distance = row.distanceStr.trim().length ? parseFloatOrNull(row.distanceStr) : null;
+      if (row.distanceStr.trim().length > 0 && distance == null) {
+        return { ok: false, error: "Distanz-Format ungültig (z.B. 12.34)." };
+      }
+    }
+
+    const note = row.noteStr.trim().length ? row.noteStr.trim() : null;
+    const achieved_at = row.achievedAtLocal ? new Date(row.achievedAtLocal).toISOString() : null;
 
     return {
-      run_id: selectedRunId,
-      team_id: r.team.id,
-      points,
-      time_ms,
-      distance_mm,
+      ok: true,
+      data: {
+        event_id: activeEvent.id,
+        discipline_id: selectedRun.discipline_id,
+        run_id: selectedRun.id,
+        team_id: row.team.id,
+
+        points_manual,
+        time_ms,
+        distance,
+
+        achieved_at,
+        note,
+
+        updated_at: new Date().toISOString(),
+      },
     };
   };
 
   const saveRow = async (teamId: string) => {
-    if (!selectedRunId) {
-      toast("Bitte zuerst einen Lauf auswählen.");
-      return;
-    }
+    if (!activeEvent?.id) return toast("Kein aktives Event.");
+    if (!selectedRun) return toast("Bitte zuerst einen Lauf auswählen.");
 
     const row = vmRows.find((x) => x.team.id === teamId);
     if (!row) return;
 
-    const payload = buildUpsertPayload(row);
+    const built = buildPayload(row);
+    if (!built.ok) {
+      toast(built.error);
+      return;
+    }
 
-    // If payload null -> delete existing row (if any)
     setVmRows((prev) => prev.map((x) => (x.team.id === teamId ? { ...x, saving: true } : x)));
 
     try {
-      if (!payload) {
-        const del = await supabase
+      const existing = resultsByTeam.get(teamId);
+
+      if (existing?.id) {
+        const upd = await supabase
           .from("games_run_results")
-          .delete()
-          .eq("run_id", selectedRunId)
-          .eq("team_id", teamId);
-
-        if (del.error) throw del.error;
-
-        setVmRows((prev) =>
-          prev.map((x) =>
-            x.team.id === teamId ? { ...x, dirty: false, saving: false, pointsStr: x.pointsStr, timeStr: x.timeStr, distStr: x.distStr } : x
+          .update(built.data)
+          .eq("id", existing.id)
+          .select(
+            "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
           )
-        );
+          .single();
 
-        toast("Eintrag gelöscht (leer gespeichert).");
-        // refresh results to stay aligned
-        await loadResultsForRun(selectedRunId);
-        return;
+        if (upd.error) throw upd.error;
+      } else {
+        const ins = await supabase
+          .from("games_run_results")
+          .insert(built.data)
+          .select(
+            "id,event_id,discipline_id,run_id,team_id,points_manual,time_ms,distance,achieved_at,note,place,points_awarded,created_at,updated_at"
+          )
+          .single();
+
+        if (ins.error) throw ins.error;
       }
 
-      // Requires unique constraint on (run_id, team_id) for onConflict to work reliably
-      const up = await supabase
-        .from("games_run_results")
-        .upsert(payload, { onConflict: "run_id,team_id" })
-        .select("run_id,team_id,points,time_ms,distance_mm")
-        .maybeSingle();
-
-      if (up.error) throw up.error;
-
-      setVmRows((prev) =>
-        prev.map((x) => (x.team.id === teamId ? { ...x, dirty: false, saving: false } : x))
-      );
-
       toast("Gespeichert.");
-      await loadResultsForRun(selectedRunId);
+      await loadResultsForRun(selectedRun.id);
     } catch (e: any) {
       const msg = e?.message ?? "Unbekannt";
       const lower = String(msg).toLowerCase();
@@ -392,59 +476,39 @@ const GamesResults: React.FC = () => {
       } else {
         toast(`Save Fehler: ${msg}`);
       }
+    } finally {
       setVmRows((prev) => prev.map((x) => (x.team.id === teamId ? { ...x, saving: false } : x)));
     }
   };
 
   const saveAllDirty = async () => {
-    if (!selectedRunId) {
-      toast("Bitte zuerst einen Lauf auswählen.");
-      return;
-    }
-    if (!hasDirty) {
-      toast("Nichts zu speichern.");
-      return;
-    }
+    if (!activeEvent?.id) return toast("Kein aktives Event.");
+    if (!selectedRun) return toast("Bitte zuerst einen Lauf auswählen.");
+    if (!hasDirty) return toast("Nichts zu speichern.");
 
     setGlobalSaving(true);
     try {
-      // Build payloads for dirty rows only
-      const dirty = vmRows.filter((r) => r.dirty);
+      // bewusst sequenziell: weniger Stress für DB/RLS, leichter zu debuggen
+      for (const r of vmRows.filter((x) => x.dirty)) {
+        const built = buildPayload(r);
+        if (!built.ok) {
+          toast(`Team "${r.team.name}": ${built.error}`);
+          continue;
+        }
 
-      // Upserts to perform
-      const upserts: RunResultRow[] = [];
-      const deletes: { team_id: string }[] = [];
+        const existing = resultsByTeam.get(r.team.id);
 
-      for (const r of dirty) {
-        const payload = buildUpsertPayload(r);
-        if (!payload) {
-          deletes.push({ team_id: r.team.id });
+        if (existing?.id) {
+          const upd = await supabase.from("games_run_results").update(built.data).eq("id", existing.id);
+          if (upd.error) throw upd.error;
         } else {
-          upserts.push(payload);
+          const ins = await supabase.from("games_run_results").insert(built.data);
+          if (ins.error) throw ins.error;
         }
       }
 
-      if (upserts.length) {
-        const up = await supabase
-          .from("games_run_results")
-          .upsert(upserts, { onConflict: "run_id,team_id" });
-
-        if (up.error) throw up.error;
-      }
-
-      // deletes one-by-one (simpler and safe)
-      for (const d of deletes) {
-        const del = await supabase
-          .from("games_run_results")
-          .delete()
-          .eq("run_id", selectedRunId)
-          .eq("team_id", d.team_id);
-
-        if (del.error) throw del.error;
-      }
-
       toast("Alle Änderungen gespeichert.");
-      await loadResultsForRun(selectedRunId);
+      await loadResultsForRun(selectedRun.id);
     } catch (e: any) {
       const msg = e?.message ?? "Unbekannt";
       const lower = String(msg).toLowerCase();
@@ -460,9 +524,9 @@ const GamesResults: React.FC = () => {
 
   const scoringHint = useMemo(() => {
     if (!scoringMode) return "Bitte Lauf auswählen.";
-    if (scoringMode === "points_only") return "Modus: points_only (nur Punkte).";
-    if (scoringMode === "time_best") return 'Modus: time_best (Zeit). Format z. B. "1:23" oder "83.5".';
-    return "Modus: distance_best (Distanz). Einheit: distance_mm (Integer).";
+    if (scoringMode === "points_only") return "Modus: points_only (points_manual).";
+    if (scoringMode === "time_best") return 'Modus: time_best (time_ms). Eingabe z.B. "1:23" oder "83.5".';
+    return "Modus: distance_best (distance). Eingabe Zahl (z.B. 12.34).";
   }, [scoringMode]);
 
   return (
@@ -484,7 +548,7 @@ const GamesResults: React.FC = () => {
       </IonHeader>
 
       <IonContent className="ion-padding">
-        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
           {/* CONTEXT */}
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
@@ -515,7 +579,7 @@ const GamesResults: React.FC = () => {
               <IonNote style={{ display: "block", marginTop: 10 }}>{scoringHint}</IonNote>
 
               <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <IonItem style={{ flex: "1 1 420px" }}>
+                <IonItem style={{ flex: "1 1 560px" }}>
                   <IonLabel position="stacked">Lauf auswählen</IonLabel>
                   <IonSelect
                     value={selectedRunId}
@@ -538,10 +602,7 @@ const GamesResults: React.FC = () => {
                   </IonSelect>
                 </IonItem>
 
-                <IonButton
-                  onClick={() => void saveAllDirty()}
-                  disabled={!selectedRunId || !hasDirty || globalSaving}
-                >
+                <IonButton onClick={() => void saveAllDirty()} disabled={!selectedRunId || !hasDirty || globalSaving}>
                   <IonIcon icon={saveOutline} slot="start" />
                   Alles speichern
                 </IonButton>
@@ -560,7 +621,7 @@ const GamesResults: React.FC = () => {
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Ergebnisse pro Team</div>
               <IonNote style={{ display: "block", marginTop: 6 }}>
-                Speichert in <b>games_run_results</b> (upsert per run_id + team_id).
+                Schreibt in <b>games_run_results</b> (points_manual / time_ms / distance / achieved_at / note).
               </IonNote>
 
               <div style={{ marginTop: 12 }}>
@@ -591,32 +652,35 @@ const GamesResults: React.FC = () => {
                     {vmRows.map((r) => {
                       const showTime = scoringMode === "time_best";
                       const showDist = scoringMode === "distance_best";
+
                       return (
                         <IonItem key={r.team.id} detail={false}>
-                          <IonLabel style={{ minWidth: 180 }}>
+                          <IonLabel style={{ minWidth: 200 }}>
                             <div style={{ fontWeight: 950 }}>{r.team.name}</div>
-                            <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+
+                            <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                               {r.dirty ? (
                                 <IonChip style={{ height: 22, fontWeight: 900 }}>dirty</IonChip>
                               ) : (
                                 <IonChip style={{ height: 22, fontWeight: 900, opacity: 0.7 }}>ok</IonChip>
                               )}
-                              {r.saving ? (
-                                <IonChip style={{ height: 22, fontWeight: 900 }}>saving…</IonChip>
+                              {r.saving ? <IonChip style={{ height: 22, fontWeight: 900 }}>saving…</IonChip> : null}
+                              {r.place != null ? <IonChip style={{ height: 22, fontWeight: 900 }}>Platz {r.place}</IonChip> : null}
+                              {r.pointsAwarded != null ? (
+                                <IonChip style={{ height: 22, fontWeight: 900 }}>awarded {r.pointsAwarded}</IonChip>
                               ) : null}
                             </div>
                           </IonLabel>
 
-                          {/* Points (always possible) */}
                           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                            <IonItem style={{ width: 140 }} lines="none">
-                              <IonLabel position="stacked">Punkte</IonLabel>
+                            <IonItem style={{ width: 150 }} lines="none">
+                              <IonLabel position="stacked">points_manual</IonLabel>
                               <IonInput
-                                value={r.pointsStr}
+                                value={r.pointsManualStr}
                                 inputmode="numeric"
-                                placeholder="z. B. 10"
+                                placeholder="z.B. 10"
                                 onIonInput={(e) =>
-                                  updateVmField(r.team.id, "pointsStr", String(e.detail.value ?? ""))
+                                  updateVmField(r.team.id, "pointsManualStr", String(e.detail.value ?? ""))
                                 }
                                 disabled={globalSaving || r.saving}
                               />
@@ -624,10 +688,10 @@ const GamesResults: React.FC = () => {
 
                             {showTime ? (
                               <IonItem style={{ width: 170 }} lines="none">
-                                <IonLabel position="stacked">Zeit</IonLabel>
+                                <IonLabel position="stacked">time_ms</IonLabel>
                                 <IonInput
                                   value={r.timeStr}
-                                  placeholder='z. B. "1:23"'
+                                  placeholder='z.B. "1:23"'
                                   onIonInput={(e) =>
                                     updateVmField(r.team.id, "timeStr", String(e.detail.value ?? ""))
                                   }
@@ -637,19 +701,43 @@ const GamesResults: React.FC = () => {
                             ) : null}
 
                             {showDist ? (
-                              <IonItem style={{ width: 190 }} lines="none">
-                                <IonLabel position="stacked">Distanz (mm)</IonLabel>
+                              <IonItem style={{ width: 170 }} lines="none">
+                                <IonLabel position="stacked">distance</IonLabel>
                                 <IonInput
-                                  value={r.distStr}
-                                  inputmode="numeric"
-                                  placeholder="z. B. 12345"
+                                  value={r.distanceStr}
+                                  inputmode="decimal"
+                                  placeholder="z.B. 12.34"
                                   onIonInput={(e) =>
-                                    updateVmField(r.team.id, "distStr", String(e.detail.value ?? ""))
+                                    updateVmField(r.team.id, "distanceStr", String(e.detail.value ?? ""))
                                   }
                                   disabled={globalSaving || r.saving}
                                 />
                               </IonItem>
                             ) : null}
+
+                            <IonItem style={{ width: 220 }} lines="none">
+                              <IonLabel position="stacked">achieved_at (opt.)</IonLabel>
+                              <IonInput
+                                value={r.achievedAtLocal}
+                                type="datetime-local"
+                                onIonInput={(e) =>
+                                  updateVmField(r.team.id, "achievedAtLocal", String(e.detail.value ?? ""))
+                                }
+                                disabled={globalSaving || r.saving}
+                              />
+                            </IonItem>
+
+                            <IonItem style={{ width: 260 }} lines="none">
+                              <IonLabel position="stacked">note (opt.)</IonLabel>
+                              <IonInput
+                                value={r.noteStr}
+                                placeholder="Notiz…"
+                                onIonInput={(e) =>
+                                  updateVmField(r.team.id, "noteStr", String(e.detail.value ?? ""))
+                                }
+                                disabled={globalSaving || r.saving}
+                              />
+                            </IonItem>
 
                             <IonButton
                               size="small"
@@ -668,22 +756,13 @@ const GamesResults: React.FC = () => {
               </div>
 
               <IonNote style={{ display: "block", marginTop: 10 }}>
-                Hinweis: Für Upsert braucht ihr in Supabase einen Unique Constraint auf <b>(run_id, team_id)</b>.
-              </IonNote>
-              <IonNote style={{ display: "block", marginTop: 6 }}>
-                Wenn Save „RLS/Policy“ meldet: Policies für <b>games_run_results</b> (INSERT/UPDATE/DELETE) für
-                authenticated fehlen.
+                Wenn Save geblockt wird: Policies für <b>games_run_results</b> (INSERT/UPDATE) für authenticated fehlen.
               </IonNote>
             </IonCardContent>
           </IonCard>
         </div>
 
-        <IonToast
-          isOpen={toastOpen}
-          message={toastMsg}
-          duration={3000}
-          onDidDismiss={() => setToastOpen(false)}
-        />
+        <IonToast isOpen={toastOpen} message={toastMsg} duration={3000} onDidDismiss={() => setToastOpen(false)} />
       </IonContent>
     </IonPage>
   );
