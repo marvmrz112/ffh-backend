@@ -24,12 +24,7 @@ import {
   IonAlert,
   IonChip,
 } from "@ionic/react";
-import {
-  addOutline,
-  refreshOutline,
-  trashOutline,
-  playOutline,
-} from "ionicons/icons";
+import { addOutline, refreshOutline, trashOutline, playOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
 type ActiveEventRow = {
@@ -114,10 +109,19 @@ const GamesRuns: React.FC = () => {
     setStatus("scheduled");
   };
 
+  /**
+   * IMPORTANT:
+   * Do NOT depend on games_active_event view here.
+   * Load active event directly from games_events where active=true.
+   */
   const loadActiveEvent = async (): Promise<ActiveEventRow | null> => {
+    // Primary: direct query on table
     const res = await supabase
-      .from("games_active_event")
+      .from("games_events")
       .select("id,name,subtitle,starts_at")
+      .eq("active", true)
+      .order("updated_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     if (res.error) throw res.error;
@@ -125,16 +129,34 @@ const GamesRuns: React.FC = () => {
   };
 
   const loadDisciplines = async (eventId: string) => {
-    // sort_order may or may not exist -> if not, remove it + order() below
-    const res = await supabase
+    // Try with sort_order (if column exists)
+    const withSort = await supabase
       .from("games_disciplines")
       .select("id,event_id,name,scoring_mode,sort_order")
       .eq("event_id", eventId)
       .order("sort_order", { ascending: true, nullsFirst: false })
       .order("name", { ascending: true });
 
-    if (res.error) throw res.error;
-    setDisciplines((res.data as DisciplineRow[]) ?? []);
+    if (!withSort.error) {
+      setDisciplines((withSort.data as DisciplineRow[]) ?? []);
+      return;
+    }
+
+    // Fallback: if sort_order column doesn't exist -> query without it
+    const msg = withSort.error.message?.toLowerCase?.() ?? "";
+    if (msg.includes("sort_order") || msg.includes("does not exist")) {
+      const fallback = await supabase
+        .from("games_disciplines")
+        .select("id,event_id,name,scoring_mode")
+        .eq("event_id", eventId)
+        .order("name", { ascending: true });
+
+      if (fallback.error) throw fallback.error;
+      setDisciplines((fallback.data as DisciplineRow[]) ?? []);
+      return;
+    }
+
+    throw withSort.error;
   };
 
   const loadRuns = async (eventId: string) => {
@@ -189,6 +211,7 @@ const GamesRuns: React.FC = () => {
       name: runName.trim().length ? runName.trim() : null,
       starts_at: startsAtLocal ? new Date(startsAtLocal).toISOString() : null,
       status: status ?? "scheduled",
+      updated_at: new Date().toISOString(),
     };
 
     const res = await supabase
@@ -249,8 +272,7 @@ const GamesRuns: React.FC = () => {
 
   const statusChip = (s?: string | null) => {
     const val = (s ?? "").toLowerCase();
-    const label =
-      val === "running" ? "running" : val === "done" ? "done" : "scheduled";
+    const label = val === "running" ? "running" : val === "done" ? "done" : "scheduled";
     return (
       <IonChip style={{ height: 22, fontWeight: 900, opacity: 0.9 }}>
         {label}
