@@ -27,10 +27,7 @@ import {
 import { addOutline, refreshOutline, trashOutline, playOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
-/**
- * Admin backend: DO NOT depend on games_active_event view.
- * Always read active event directly from games_events (active=true).
- */
+const BUILD_ID = "runs-v5-split-errors-2026-01-24";
 
 type ActiveEventRow = {
   id: string;
@@ -46,7 +43,6 @@ type DisciplineRow = {
   event_id: string;
   name: string;
   scoring_mode: ScoringMode;
-  // optional in DB; we handle missing column gracefully
   sort_order?: number | null;
 };
 
@@ -60,7 +56,6 @@ type RunRow = {
   starts_at: string | null;
   status: RunStatus | string | null;
   created_at?: string | null;
-  updated_at?: string | null;
 };
 
 function formatBerlin(ts?: string | null) {
@@ -87,26 +82,35 @@ function toIsoOrNull(datetimeLocal: string): string | null {
   return d.toISOString();
 }
 
-function isRlsError(msg?: string) {
+function isRls(msg?: string) {
   const m = (msg ?? "").toLowerCase();
   return m.includes("row-level security") || m.includes("rls") || m.includes("policy");
 }
 
+function isFk(msg?: string) {
+  const m = (msg ?? "").toLowerCase();
+  return m.includes("foreign key") || m.includes("violates foreign key");
+}
+
 const GamesRuns: React.FC = () => {
-  const [loading, setLoading] = useState(true);
+  const [loadingEvent, setLoadingEvent] = useState(true);
+  const [loadingLists, setLoadingLists] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [activeEvent, setActiveEvent] = useState<ActiveEventRow | null>(null);
   const [disciplines, setDisciplines] = useState<DisciplineRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
 
-  // Create form
+  const [discError, setDiscError] = useState<string | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
+
+  // Create
   const [disciplineId, setDisciplineId] = useState<string>("");
   const [runName, setRunName] = useState<string>("");
   const [startsAtLocal, setStartsAtLocal] = useState<string>("");
   const [status, setStatus] = useState<RunStatus>("scheduled");
 
-  // Delete confirm
+  // Delete
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
@@ -119,8 +123,8 @@ const GamesRuns: React.FC = () => {
   };
 
   const canCreate = useMemo(() => {
-    return !!activeEvent?.id && disciplineId.length > 0 && !saving && !loading;
-  }, [activeEvent?.id, disciplineId, saving, loading]);
+    return !!activeEvent?.id && disciplineId.length > 0 && !saving && !loadingEvent && !loadingLists;
+  }, [activeEvent?.id, disciplineId, saving, loadingEvent, loadingLists]);
 
   const resetForm = () => {
     setDisciplineId("");
@@ -129,22 +133,30 @@ const GamesRuns: React.FC = () => {
     setStatus("scheduled");
   };
 
-  const loadActiveEvent = async (): Promise<ActiveEventRow | null> => {
-    const res = await supabase
-      .from("games_events")
-      .select("id,name,subtitle,starts_at,updated_at,created_at")
-      .eq("active", true)
-      .order("updated_at", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+  // 1) Active Event: bevorzugt View (die bei dir definitiv Daten hat)
+  const loadActiveEvent = async () => {
+    setLoadingEvent(true);
+    try {
+      const res = await supabase
+        .from("games_active_event")
+        .select("id,name,subtitle,starts_at")
+        .maybeSingle();
 
-    if (res.error) throw res.error;
-    return (res.data as any as ActiveEventRow) ?? null;
+      if (res.error) throw res.error;
+      setActiveEvent((res.data as ActiveEventRow) ?? null);
+    } catch (e: any) {
+      toast(`ActiveEvent Load Fehler: ${e?.message ?? "Unbekannt"}`);
+      setActiveEvent(null);
+    } finally {
+      setLoadingEvent(false);
+    }
   };
 
+  // 2) Lists: getrennt laden, Fehler getrennt anzeigen (nicht Event wegwerfen)
   const loadDisciplines = async (eventId: string) => {
-    // Try with sort_order; fallback if column not present
+    setDiscError(null);
+
+    // Try with sort_order, fallback if not existing
     const withSort = await supabase
       .from("games_disciplines")
       .select("id,event_id,name,scoring_mode,sort_order")
@@ -174,9 +186,10 @@ const GamesRuns: React.FC = () => {
   };
 
   const loadRuns = async (eventId: string) => {
+    setRunsError(null);
     const res = await supabase
       .from("games_runs")
-      .select("id,event_id,discipline_id,name,starts_at,status,created_at,updated_at")
+      .select("id,event_id,discipline_id,name,starts_at,status,created_at")
       .eq("event_id", eventId)
       .order("created_at", { ascending: false });
 
@@ -184,33 +197,48 @@ const GamesRuns: React.FC = () => {
     setRuns((res.data as RunRow[]) ?? []);
   };
 
-  const loadAll = async () => {
-    setLoading(true);
-    try {
-      const ev = await loadActiveEvent();
-      setActiveEvent(ev);
-
-      if (!ev?.id) {
-        setDisciplines([]);
-        setRuns([]);
-        return;
-      }
-
-      await Promise.all([loadDisciplines(ev.id), loadRuns(ev.id)]);
-    } catch (e: any) {
-      const msg = e?.message ?? "Unbekannt";
-      toast(`Load Fehler: ${msg}`);
-      setActiveEvent(null);
+  const loadLists = async () => {
+    const eventId = activeEvent?.id;
+    if (!eventId) {
       setDisciplines([]);
       setRuns([]);
+      return;
+    }
+
+    setLoadingLists(true);
+    try {
+      await loadDisciplines(eventId);
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      setDiscError(isRls(msg) ? `RLS blockt games_disciplines: ${msg}` : msg);
+      setDisciplines([]);
+    }
+
+    try {
+      await loadRuns(eventId);
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      setRunsError(isRls(msg) ? `RLS blockt games_runs: ${msg}` : msg);
+      setRuns([]);
     } finally {
-      setLoading(false);
+      setLoadingLists(false);
     }
   };
 
+  const refreshAll = async () => {
+    await loadActiveEvent();
+    // activeEvent state update happens async; use a microtask to then load lists
+    setTimeout(() => void loadLists(), 0);
+  };
+
+  useEffect(() => {
+    void refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const createRun = async () => {
     if (!activeEvent?.id) {
-      toast("Kein aktives Event. Bitte zuerst unter /games/events ein Event aktiv setzen.");
+      toast("Kein aktives Event. Bitte zuerst unter /games/events aktiv setzen.");
       return;
     }
     if (!disciplineId) {
@@ -225,14 +253,14 @@ const GamesRuns: React.FC = () => {
         discipline_id: disciplineId,
         name: runName.trim().length ? runName.trim() : null,
         starts_at: toIsoOrNull(startsAtLocal),
-        status: status ?? "scheduled",
+        status,
         updated_at: new Date().toISOString(),
       };
 
       const res = await supabase
         .from("games_runs")
         .insert(payload)
-        .select("id,event_id,discipline_id,name,starts_at,status,created_at,updated_at")
+        .select("id,event_id,discipline_id,name,starts_at,status,created_at")
         .single();
 
       if (res.error) throw res.error;
@@ -242,8 +270,7 @@ const GamesRuns: React.FC = () => {
       await loadRuns(activeEvent.id);
     } catch (e: any) {
       const msg = e?.message ?? "Unbekannt";
-      if (isRlsError(msg)) toast(`Create geblockt (RLS/Policy): ${msg}`);
-      else toast(`Create Fehler: ${msg}`);
+      toast(isRls(msg) ? `Create geblockt (RLS games_runs): ${msg}` : `Create Fehler: ${msg}`);
     } finally {
       setSaving(false);
     }
@@ -274,12 +301,11 @@ const GamesRuns: React.FC = () => {
       setDeleteTarget(null);
 
       if (activeEvent?.id) await loadRuns(activeEvent.id);
-      else await loadAll();
+      else await refreshAll();
     } catch (e: any) {
       const msg = e?.message ?? "Unbekannt";
-      if (isRlsError(msg)) toast(`Delete geblockt (RLS/Policy): ${msg}`);
-      else if ((msg ?? "").toLowerCase().includes("foreign key"))
-        toast("Delete nicht möglich: Es hängen noch Ergebnisse an diesem Lauf (FK). Erst Results löschen.");
+      if (isRls(msg)) toast(`Delete geblockt (RLS games_runs): ${msg}`);
+      else if (isFk(msg)) toast("Delete nicht möglich: Es hängen noch Results am Lauf (FK). Erst Results löschen.");
       else toast(`Delete Fehler: ${msg}`);
     } finally {
       setSaving(false);
@@ -292,11 +318,6 @@ const GamesRuns: React.FC = () => {
     return <IonChip style={{ height: 22, fontWeight: 900, opacity: 0.9 }}>{label}</IonChip>;
   };
 
-  useEffect(() => {
-    void loadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <IonPage>
       <IonHeader>
@@ -304,11 +325,9 @@ const GamesRuns: React.FC = () => {
           <IonButtons slot="start">
             <IonBackButton defaultHref="/games" />
           </IonButtons>
-
           <IonTitle>Games · Läufe</IonTitle>
-
           <IonButtons slot="end">
-            <IonButton onClick={() => void loadAll()} disabled={loading || saving}>
+            <IonButton onClick={() => void refreshAll()} disabled={loadingEvent || loadingLists || saving}>
               <IonIcon icon={refreshOutline} slot="icon-only" />
             </IonButton>
           </IonButtons>
@@ -317,6 +336,17 @@ const GamesRuns: React.FC = () => {
 
       <IonContent className="ion-padding">
         <div style={{ maxWidth: 980, margin: "0 auto" }}>
+          {/* BUILD */}
+          <IonCard style={{ borderRadius: 18 }}>
+            <IonCardContent>
+              <div style={{ fontWeight: 950 }}>Build</div>
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8, fontWeight: 800 }}>{BUILD_ID}</div>
+              <IonNote style={{ display: "block", marginTop: 8 }}>
+                Wenn du hier nicht genau diese ID siehst, rendert Vercel/Router nicht diese Datei.
+              </IonNote>
+            </IonCardContent>
+          </IonCard>
+
           {/* ACTIVE EVENT */}
           <IonCard style={{ borderRadius: 18 }}>
             <IonCardContent>
@@ -326,7 +356,7 @@ const GamesRuns: React.FC = () => {
               </div>
 
               <div style={{ marginTop: 10 }}>
-                {loading ? (
+                {loadingEvent ? (
                   <IonSpinner />
                 ) : activeEvent ? (
                   <>
@@ -344,14 +374,31 @@ const GamesRuns: React.FC = () => {
                   </IonNote>
                 )}
               </div>
-
-              {activeEvent && disciplines.length === 0 && !loading ? (
-                <IonNote style={{ display: "block", marginTop: 10 }}>
-                  Hinweis: Keine Disziplinen gefunden. Lege zuerst Disziplinen an (<b>/games/disciplines</b>).
-                </IonNote>
-              ) : null}
             </IonCardContent>
           </IonCard>
+
+          {/* ERRORS (separat!) */}
+          {(discError || runsError) && (
+            <IonCard style={{ borderRadius: 18 }}>
+              <IonCardContent>
+                <div style={{ fontWeight: 950 }}>Fehler</div>
+                {discError && (
+                  <IonText color="danger">
+                    <p>
+                      <b>Disziplinen:</b> {discError}
+                    </p>
+                  </IonText>
+                )}
+                {runsError && (
+                  <IonText color="danger">
+                    <p>
+                      <b>Läufe:</b> {runsError}
+                    </p>
+                  </IonText>
+                )}
+              </IonCardContent>
+            </IonCard>
+          )}
 
           {/* CREATE RUN */}
           <IonCard style={{ borderRadius: 18 }}>
@@ -373,7 +420,7 @@ const GamesRuns: React.FC = () => {
                     interface="popover"
                     placeholder={disciplines.length ? "Disziplin auswählen" : "Keine Disziplinen"}
                     onIonChange={(e) => setDisciplineId(String(e.detail.value ?? ""))}
-                    disabled={saving || !activeEvent || disciplines.length === 0}
+                    disabled={saving || !activeEvent || disciplines.length === 0 || loadingLists}
                   >
                     {disciplines.map((d) => (
                       <IonSelectOption key={d.id} value={d.id}>
@@ -425,12 +472,6 @@ const GamesRuns: React.FC = () => {
                     Zurücksetzen
                   </IonButton>
                 </div>
-
-                {!activeEvent && (
-                  <IonNote style={{ display: "block", marginTop: 10 }}>
-                    Hinweis: Erst ein Event aktiv setzen, dann Läufe anlegen.
-                  </IonNote>
-                )}
               </div>
             </IonCardContent>
           </IonCard>
@@ -444,7 +485,7 @@ const GamesRuns: React.FC = () => {
               </IonNote>
 
               <div style={{ marginTop: 12 }}>
-                {loading ? (
+                {loadingLists ? (
                   <IonSpinner />
                 ) : !activeEvent ? (
                   <IonText color="medium">
@@ -462,14 +503,7 @@ const GamesRuns: React.FC = () => {
                         <IonItem key={r.id} detail={false}>
                           <IonLabel style={{ minWidth: 0 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <div
-                                style={{
-                                  fontWeight: 950,
-                                  fontSize: 16,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                }}
-                              >
+                              <div style={{ fontWeight: 950, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis" }}>
                                 {r.name ?? "Unbenannter Lauf"}
                               </div>
                               {statusChip(r.status)}
@@ -485,7 +519,13 @@ const GamesRuns: React.FC = () => {
                             </div>
                           </IonLabel>
 
-                          <IonButton size="small" color="danger" fill="outline" disabled={saving} onClick={() => askDelete(r)}>
+                          <IonButton
+                            size="small"
+                            color="danger"
+                            fill="outline"
+                            disabled={saving}
+                            onClick={() => askDelete(r)}
+                          >
                             <IonIcon icon={trashOutline} slot="icon-only" />
                           </IonButton>
                         </IonItem>
