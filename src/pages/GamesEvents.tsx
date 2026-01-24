@@ -272,7 +272,7 @@ const GamesEvents: React.FC = () => {
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Neues Event</div>
               <IonNote style={{ display: "block", marginTop: 6 }}>
-                Tipp: Danach „Aktiv setzen“, damit <b>games_active_event</b> eine Zeile liefert.
+                
               </IonNote>
 
               <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
@@ -280,7 +280,7 @@ const GamesEvents: React.FC = () => {
                   <IonLabel position="stacked">Name</IonLabel>
                   <IonInput
                     value={form.name}
-                    placeholder="z.B. FFH Spiele 2026"
+                    placeholder="z.B. Schubkarrenrennen"
                     onIonInput={(e) => setForm((p) => ({ ...p, name: String(e.detail.value ?? "") }))}
                     disabled={saving}
                   />
@@ -428,7 +428,7 @@ const GamesEvents: React.FC = () => {
                 )}
 
                 <IonNote style={{ display: "block", marginTop: 10 }}>
-                  Wenn Delete fehlschlägt: entweder RLS/Policy oder es hängen noch Daten dran (FK).
+                  
                 </IonNote>
               </div>
             </IonCardContent>

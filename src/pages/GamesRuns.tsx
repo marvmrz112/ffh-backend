@@ -672,7 +672,7 @@ const GamesRuns: React.FC = () => {
               )}
 
               <IonNote style={{ display: "block", marginTop: 12 }}>
-                Wichtig: “Starten/Done” schreibt direkt in die DB (kein State-Race). Wenn es trotzdem zurückspringt, ist es RLS/Constraint.
+                Wichtig: “Starten/Done” schreibt direkt in die DB (kein State-Race). 
               </IonNote>
             </IonCardContent>
           </IonCard>

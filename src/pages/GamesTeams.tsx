@@ -391,7 +391,7 @@ const GamesTeams: React.FC = () => {
               </div>
 
               <IonNote style={{ display: "block", marginTop: 10 }}>
-                Wenn Delete fehlschlägt: häufig hängen Results/Runs an Teams (FK Constraint) oder RLS.
+              
               </IonNote>
             </IonCardContent>
           </IonCard>

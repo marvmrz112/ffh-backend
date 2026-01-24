@@ -285,7 +285,7 @@ const GamesHome: React.FC = () => {
           <IonTitle>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
               <IonIcon icon={trophyOutline} />
-              Spiele (Admin)
+              Spiele
             </span>
           </IonTitle>
 
