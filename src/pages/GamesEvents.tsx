@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  IonAlert,
   IonButton,
   IonCard,
   IonCardContent,
@@ -18,7 +19,7 @@ import {
   IonToolbar,
   IonToast,
 } from "@ionic/react";
-import { addOutline, refreshOutline, starOutline } from "ionicons/icons";
+import { addOutline, refreshOutline, starOutline, trashOutline } from "ionicons/icons";
 import { supabase } from "../lib/supabase";
 
 type GamesEventRow = {
@@ -64,10 +65,8 @@ function formatBerlin(ts?: string | null) {
 function toIsoOrNull(datetimeLocal: string): string | null {
   const v = (datetimeLocal ?? "").trim();
   if (!v) return null;
-
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return null;
-
   return d.toISOString();
 }
 
@@ -92,6 +91,9 @@ const GamesEvents: React.FC = () => {
     endsAt: "",
     publicVisible: true,
   });
+
+  const [deleteTarget, setDeleteTarget] = useState<GamesEventRow | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const canCreate = useMemo(() => form.name.trim().length > 0, [form.name]);
 
@@ -172,7 +174,6 @@ const GamesEvents: React.FC = () => {
   const setActive = async (eventId: string) => {
     setSaving(true);
     try {
-      // 1) alle deaktivieren
       const off = await supabase
         .from("games_events")
         .update({ active: false, updated_at: new Date().toISOString() })
@@ -180,7 +181,6 @@ const GamesEvents: React.FC = () => {
 
       if (off.error) throw off.error;
 
-      // 2) gewünschtes aktivieren
       const on = await supabase
         .from("games_events")
         .update({ active: true, updated_at: new Date().toISOString() })
@@ -202,6 +202,44 @@ const GamesEvents: React.FC = () => {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const requestDelete = (row: GamesEventRow) => {
+    setDeleteTarget(row);
+    setDeleteOpen(true);
+  };
+
+  const deleteEvent = async () => {
+    const target = deleteTarget;
+    setDeleteOpen(false);
+    if (!target) return;
+
+    setSaving(true);
+    try {
+      if (target.active) {
+        toast("Aktives Event kann nicht gelöscht werden. Setze erst ein anderes aktiv oder deaktiviere es.");
+        return;
+      }
+
+      const del = await supabase.from("games_events").delete().eq("id", target.id);
+      if (del.error) throw del.error;
+
+      toast("Event gelöscht.");
+      await load();
+    } catch (e: any) {
+      const msg = e?.message ?? "Unbekannt";
+      const lower = String(msg).toLowerCase();
+      if (lower.includes("row-level security") || lower.includes("policy")) {
+        toast("Delete geblockt: RLS/Policy verhindert DELETE auf games_events.");
+      } else if (lower.includes("violates foreign key") || lower.includes("foreign key")) {
+        toast("Delete nicht möglich: Es hängen noch Daten dran (FK). Erst Disziplinen/Teams/Läufe/Ergebnisse löschen.");
+      } else {
+        toast(`Delete Fehler: ${msg}`);
+      }
+    } finally {
+      setSaving(false);
+      setDeleteTarget(null);
     }
   };
 
@@ -243,9 +281,7 @@ const GamesEvents: React.FC = () => {
                   <IonInput
                     value={form.name}
                     placeholder="z.B. FFH Spiele 2026"
-                    onIonInput={(e) =>
-                      setForm((p) => ({ ...p, name: String(e.detail.value ?? "") }))
-                    }
+                    onIonInput={(e) => setForm((p) => ({ ...p, name: String(e.detail.value ?? "") }))}
                     disabled={saving}
                   />
                 </IonItem>
@@ -317,7 +353,7 @@ const GamesEvents: React.FC = () => {
             <IonCardContent>
               <div style={{ fontWeight: 950, fontSize: 16 }}>Events</div>
               <IonNote style={{ display: "block", marginTop: 6 }}>
-                Setze genau ein Event aktiv (<b>active=true</b>).
+                Setze genau ein Event aktiv (<b>active=true</b>). Löschen nur wenn nicht aktiv.
               </IonNote>
 
               <div style={{ marginTop: 12 }}>
@@ -332,7 +368,14 @@ const GamesEvents: React.FC = () => {
                     {rows.map((r) => (
                       <IonItem key={r.id} detail={false}>
                         <IonLabel>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 10,
+                              flexWrap: "wrap",
+                            }}
+                          >
                             <div style={{ fontWeight: 950 }}>{r.name}</div>
 
                             {r.active ? (
@@ -358,27 +401,54 @@ const GamesEvents: React.FC = () => {
                           </div>
                         </IonLabel>
 
-                        <IonButton
-                          size="small"
-                          onClick={() => void setActive(r.id)}
-                          disabled={saving}
-                          style={{ marginLeft: 10 }}
-                        >
-                          <IonIcon icon={starOutline} slot="start" />
-                          Aktiv setzen
-                        </IonButton>
+                        <div style={{ display: "flex", gap: 8, marginLeft: 10 }}>
+                          <IonButton
+                            size="small"
+                            onClick={() => void setActive(r.id)}
+                            disabled={saving}
+                          >
+                            <IonIcon icon={starOutline} slot="start" />
+                            Aktiv
+                          </IonButton>
+
+                          <IonButton
+                            size="small"
+                            color="danger"
+                            fill="outline"
+                            onClick={() => requestDelete(r)}
+                            disabled={saving || !!r.active}
+                            aria-label="Delete"
+                          >
+                            <IonIcon icon={trashOutline} slot="icon-only" />
+                          </IonButton>
+                        </div>
                       </IonItem>
                     ))}
                   </IonList>
                 )}
 
                 <IonNote style={{ display: "block", marginTop: 10 }}>
-                  Wenn „Aktiv setzen“ fehlschlägt: sehr wahrscheinlich RLS/Policy auf <b>games_events</b>.
+                  Wenn Delete fehlschlägt: entweder RLS/Policy oder es hängen noch Daten dran (FK).
                 </IonNote>
               </div>
             </IonCardContent>
           </IonCard>
         </div>
+
+        <IonAlert
+          isOpen={deleteOpen}
+          header="Event löschen?"
+          message={
+            deleteTarget
+              ? `Willst du das Event "${deleteTarget.name}" wirklich löschen? Das kann nicht rückgängig gemacht werden.`
+              : "Willst du das Event wirklich löschen?"
+          }
+          buttons={[
+            { text: "Abbrechen", role: "cancel" },
+            { text: "Löschen", role: "destructive", handler: () => void deleteEvent() },
+          ]}
+          onDidDismiss={() => setDeleteOpen(false)}
+        />
 
         <IonToast
           isOpen={toastOpen}
